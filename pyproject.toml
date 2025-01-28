@@ -7,7 +7,9 @@ name = "topk_decoding"
 version = "0.0.1"
 dependencies = [
     "transformers",
-    "torch"
+    "torch",
+    "faiss",
+    "einops"
 ]
 authors = [
     {name = "Ryan Synk", email="ryansynk@umd.edu"},
