@@ -4,14 +4,16 @@ import torch
 import torch.nn.functional as F
 import einops
 from torch import nn
+from transformers.cache_utils import Cache
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel
+from typing import Optional, Tuple
 
 
 class LlamaTopkAttention(LlamaAttention):
     """Topk attention mechanism"""
 
-    def __init__(self, config):
-        super().__init__(config)
+    def __init__(self, config, layer_idx):
+        super().__init__(config, layer_idx)
 
     @staticmethod
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
