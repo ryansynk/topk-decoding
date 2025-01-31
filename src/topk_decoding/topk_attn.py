@@ -6,13 +6,35 @@ import einops
 from torch import nn
 from transformers.cache_utils import Cache
 from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
+    num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+def repeat_kv_db(faiss_cache_db: List[Tuple], n_rep: int) -> List[Tuple]:
+    """
+    Take each item in the faiss_cache_db and repeat it n_rep times. This is the equivalent of repeat_kv but for lists
+    instead of tensors. Used for preparing a KV Cache for multi-query attention.
+    """
+    new_db = []
+    for item in faiss_cache_db:
+        for i in range(n_rep):
+            new_db.append(item)
+    return new_db
 
 class LlamaTopkAttention(LlamaAttention):
     """Topk attention mechanism"""
 
     def __init__(self, config, layer_idx):
+        self.topk_k = None
         super().__init__(config, layer_idx)
 
     @staticmethod
@@ -37,8 +59,8 @@ class LlamaTopkAttention(LlamaAttention):
             faiss_values, faiss_indices = search_index.search(
                 query_states[i, :, :].contiguous().to(torch.float32).cpu(), k=topk_k
             )
-            faiss_values_tensor[i, :, :] = faiss_values
-            faiss_indices_tensor[i, :, :] = faiss_indices
+            faiss_values_tensor[i, :, :] = torch.tensor(faiss_values, dtype=faiss_values_tensor.dtype)
+            faiss_indices_tensor[i, :, :] = torch.tensor(faiss_indices, dtype=faiss_indices_tensor.dtype)
 
         # Scale the dot products
         faiss_values_tensor = faiss_values_tensor / math.sqrt(D)
@@ -99,7 +121,6 @@ class LlamaTopkAttention(LlamaAttention):
         kv_heads,
         kv_groups,
         num_prev_seen_tokens=0,
-        construct_mode=False,
     ):
         """Computes output of attention block in query phase of model
 
@@ -135,7 +156,7 @@ class LlamaTopkAttention(LlamaAttention):
         if topk_k > N_k_prefix:
             topk_k = N_k_prefix
 
-        topk_values, topk_indices = get_topk_via_faiss(
+        topk_values, topk_indices = LlamaTopkAttention.get_topk_via_faiss(
             topk_k, query_states, prefix_key_db, kv_heads, kv_groups
         )
 
@@ -170,7 +191,7 @@ class LlamaTopkAttention(LlamaAttention):
         )
         softmax_denominators = topk_values_exp_sums.cuda() + score_dense_exp_sums
 
-        attn_sparse = create_sparse_matrix(
+        attn_sparse = LlamaTopkAttention.create_sparse_matrix(
             topk_values_exp
             / einops.repeat(
                 softmax_denominators.cpu(),
@@ -199,49 +220,50 @@ class LlamaTopkAttention(LlamaAttention):
             .to(query_states.dtype)
             .cuda()
         )
-        if not construct_mode:
-            xhat = xhat + attn_dense @ suffix_value_states
+        xhat = xhat + attn_dense @ suffix_value_states
         xhat = einops.rearrange(xhat, "(b h) n d -> b h n d", b=B, h=H)
         return xhat
 
     def forward(
         self,
         hidden_states: torch.Tensor,
+        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        try:
-            topk_k = kwargs["topk_k"]
-        except KeyError as e:
-            print(f"Missing required parameters: {e}")
-            raise
+        assert self.topk_k is not None, "Topk value not set!"
+        topk_k = self.topk_k
         bsz, q_len, _ = hidden_states.size()
         assert not output_attentions, "attentions not generated using faiss"
+        input_shape = hidden_states.shape[:-1]
+        hidden_shape = (*input_shape, -1, self.head_dim)
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+        #query_states = self.q_proj(hidden_states)
+        #key_states = self.k_proj(hidden_states)
+        #value_states = self.v_proj(hidden_states)
+        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-        query_states = query_states.view(
-            bsz, q_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        key_states = key_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
-        value_states = value_states.view(
-            bsz, q_len, self.num_key_value_heads, self.head_dim
-        ).transpose(1, 2)
+        _, self.num_heads, _, _ = query_states.shape
+        _, self.num_key_value_heads, _, _ = key_states.shape
+
+        #query_states = query_states.view(
+        #    bsz, q_len, self.num_attention_heads, self.head_dim
+        #).transpose(1, 2)
+        #key_states = key_states.view(
+        #    bsz, q_len, self.num_key_value_heads, self.head_dim
+        #).transpose(1, 2)
+        #value_states = value_states.view(
+        #    bsz, q_len, self.num_key_value_heads, self.head_dim
+        #).transpose(1, 2)
 
         past_key_value = getattr(self, "past_key_value", past_key_value)
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(
-            query_states, key_states, cos, sin
-        )
+        cos, sin = position_embeddings
 
         # "prefix" elements are key or value tensors that are computed offline in a "construct" phase.
         # "suffix" elements are keys/values produced at generation time, or from a "query" that is appended to the text
@@ -254,9 +276,6 @@ class LlamaTopkAttention(LlamaAttention):
             "sin": sin,
             "cos": cos,
             "cache_position": cache_position,
-            "construct_mode": construct_mode,
-            "block_mode": block_mode,
-            "window_mode": window_mode,
         }
         num_prev_seen_tokens = past_key_value.get_seq_length(self.layer_idx)
         (prefix_key_db, suffix_key_states), (
@@ -271,15 +290,14 @@ class LlamaTopkAttention(LlamaAttention):
             )
         prefix_key_db = repeat_kv_db(prefix_key_db, self.num_key_value_groups)
         prefix_value_states = repeat_kv(prefix_value_states, self.num_key_value_groups)
-        if not construct_mode:
-            suffix_key_states = repeat_kv(suffix_key_states, self.num_key_value_groups)
-            suffix_value_states = repeat_kv(
-                suffix_value_states, self.num_key_value_groups
-            )
+        suffix_key_states = repeat_kv(suffix_key_states, self.num_key_value_groups)
+        suffix_value_states = repeat_kv(
+            suffix_value_states, self.num_key_value_groups
+        )
 
         # Note that suffix key/value states are empty tensors that go unused if construct_mode=True
         device = query_states.device
-        attn_output = topk_attn(
+        attn_output = LlamaTopkAttention.topk_attn(
             topk_k,
             query_states,
             suffix_key_states,
@@ -290,14 +308,15 @@ class LlamaTopkAttention(LlamaAttention):
             self.num_heads,
             self.num_key_value_heads,
             self.num_key_value_groups,
-            construct_mode=construct_mode,
             num_prev_seen_tokens=num_prev_seen_tokens,
         )
         attn_weights = None
 
         attn_output = attn_output.to(device)
-        attn_output = attn_output.transpose(1, 2).contiguous()
-        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        #attn_output = attn_output.transpose(1, 2).contiguous()
+        #attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        #attn_output = self.o_proj(attn_output)
 
-        return attn_output, attn_weights, past_key_value
+        return attn_output, attn_weights 

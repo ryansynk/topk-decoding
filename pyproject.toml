@@ -8,8 +8,8 @@ version = "0.0.1"
 dependencies = [
     "transformers",
     "torch",
-    "faiss",
-    "einops"
+    "einops",
+    "faiss-gpu-cu12",
 ]
 authors = [
     {name = "Ryan Synk", email="ryansynk@umd.edu"},
