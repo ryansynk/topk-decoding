@@ -1,7 +1,7 @@
 import torch
 import einops
 import faiss
-from .topk_attn import LlamaTopkAttention
+from .topk_attn import TopkAttention
 from .topk_cache import TopkCache
 from transformers import AutoModelForCausalLM, DynamicCache
 from transformers.models.llama.modeling_llama import LlamaDecoderLayer
@@ -28,7 +28,7 @@ def convert_model_to_topk(model, topk_k):
     for layer_idx, layer in enumerate(model.model.layers):
         assert isinstance(layer, LlamaDecoderLayer)
         config = layer.self_attn.config
-        layer.self_attn = LlamaTopkAttention(config, layer_idx=layer_idx)
+        layer.self_attn = TopkAttention(config, layer_idx=layer_idx)
         layer.self_attn.topk_k = topk_k
 
     return model.to(dtype).to(device)

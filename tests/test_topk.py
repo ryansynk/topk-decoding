@@ -2,7 +2,8 @@ import os
 import pytest
 import torch
 import topk_decoding
-from topk_decoding import topk_decoding, topk_model
+from topk_decoding import topk_decoding
+from topk_decoding.topk_model import AutoTopkModelForCausalLM
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 
@@ -18,7 +19,7 @@ def test_import_convert_model_to_topk():
     ).to("cuda")
     model = topk_decoding.convert_model_to_topk(model)
     for layer in model.model.layers:
-        assert isinstance(layer.self_attn, topk_decoding.LlamaTopkAttention), type(
+        assert isinstance(layer.self_attn, topk_decoding.TopkAttention), type(
             layer.self_attn
         )
 
@@ -53,11 +54,15 @@ def test_generate_topk():
             do_sample=False,
             num_beams=1
         )
-        model = topk_decoding.convert_model_to_topk(
-            model, 
-            topk_k=context_inputs.input_ids.shape[-1]
-        )
-        model = model.eval()
+
+    model = AutoTopkModelForCausalLM.from_pretrained(
+        "/fs/nexus-scratch/ryansynk/.cache/huggingface/hub/models--gradientai--Llama-3-8B-Instruct-1048k/snapshots/8697fb25cb77c852311e03b4464b8467471d56a4/",
+        torch_dtype=torch.bfloat16,
+    ).to("cuda")
+    model = model.eval()
+    for idx, layer in enumerate(model.model.layers):
+        layer.self_attn.topk_k = context_inputs.input_ids.shape[-1]
+    with torch.no_grad():
         topk_cache = topk_decoding.convert_cache_to_topk(dynamic_cache.to("cpu"))
         prompt_inputs = tokenizer(context + prompt, return_tensors="pt").to("cuda")
         outputs = model.generate(
@@ -66,7 +71,7 @@ def test_generate_topk():
             do_sample=False,
             num_beams=1,
             use_cache=True,
-            past_key_values=topk_cache
+            past_key_values=topk_cache,
         )
 
     output_str_true = tokenizer.decode(outputs_true[0])

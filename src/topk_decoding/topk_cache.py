@@ -42,6 +42,7 @@ class TopkCache(Cache):
         self.seq_lengths: DefaultDict[int, int] = defaultdict(int)
         self.sparse_cache_initialized: DefaultDict[int, bool] = defaultdict(bool)
         self.flat = flat
+        super().__init__()
 
     def update(
         self,

@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import einops
 from torch import nn
 from transformers.cache_utils import Cache
-from transformers.models.llama.modeling_llama import LlamaAttention, LlamaModel
 from typing import List, Optional, Tuple, Union
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -30,12 +29,31 @@ def repeat_kv_db(faiss_cache_db: List[Tuple], n_rep: int) -> List[Tuple]:
             new_db.append(item)
     return new_db
 
-class LlamaTopkAttention(LlamaAttention):
+class TopkAttention(nn.Module):
     """Topk attention mechanism"""
-
     def __init__(self, config, layer_idx):
+        super().__init__()
+        self.config = config
+        self.layer_idx = layer_idx
+        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.scaling = self.head_dim**-0.5
+        self.attention_dropout = config.attention_dropout
+        self.is_causal = True
         self.topk_k = None
-        super().__init__(config, layer_idx)
+
+        self.q_proj = nn.Linear(
+            config.hidden_size, config.num_attention_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.k_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.v_proj = nn.Linear(
+            config.hidden_size, config.num_key_value_heads * self.head_dim, bias=config.attention_bias
+        )
+        self.o_proj = nn.Linear(
+            config.num_attention_heads * self.head_dim, config.hidden_size, bias=config.attention_bias
+        )
 
     @staticmethod
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
@@ -156,7 +174,7 @@ class LlamaTopkAttention(LlamaAttention):
         if topk_k > N_k_prefix:
             topk_k = N_k_prefix
 
-        topk_values, topk_indices = LlamaTopkAttention.get_topk_via_faiss(
+        topk_values, topk_indices = TopkAttention.get_topk_via_faiss(
             topk_k, query_states, prefix_key_db, kv_heads, kv_groups
         )
 
@@ -191,7 +209,7 @@ class LlamaTopkAttention(LlamaAttention):
         )
         softmax_denominators = topk_values_exp_sums.cuda() + score_dense_exp_sums
 
-        attn_sparse = LlamaTopkAttention.create_sparse_matrix(
+        attn_sparse = TopkAttention.create_sparse_matrix(
             topk_values_exp
             / einops.repeat(
                 softmax_denominators.cpu(),
@@ -297,7 +315,7 @@ class LlamaTopkAttention(LlamaAttention):
 
         # Note that suffix key/value states are empty tensors that go unused if construct_mode=True
         device = query_states.device
-        attn_output = LlamaTopkAttention.topk_attn(
+        attn_output = TopkAttention.topk_attn(
             topk_k,
             query_states,
             suffix_key_states,
