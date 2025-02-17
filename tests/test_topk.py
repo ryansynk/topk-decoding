@@ -30,6 +30,7 @@ def test_generate_topk():
     model = AutoModelForCausalLM.from_pretrained(
         "/fs/nexus-scratch/ryansynk/.cache/huggingface/hub/models--gradientai--Llama-3-8B-Instruct-1048k/snapshots/8697fb25cb77c852311e03b4464b8467471d56a4/",
         torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
     ).to("cuda")
     tokenizer = AutoTokenizer.from_pretrained("/fs/nexus-scratch/ryansynk/.cache/huggingface/hub/models--gradientai--Llama-3-8B-Instruct-1048k/snapshots/8697fb25cb77c852311e03b4464b8467471d56a4/")
     context = (
@@ -52,8 +53,16 @@ def test_generate_topk():
             **prompt_inputs, 
             max_new_tokens=5, 
             do_sample=False,
-            num_beams=1
+            num_beams=1,
+            past_key_values=dynamic_cache,
+            return_dict_in_generate=True,
+            output_hidden_states=True
         )
+        # Have to re-make dynamic cache because it has tokens from generation added into it
+        dynamic_cache = DynamicCache()
+        dynamic_cache = model(
+            **context_inputs, 
+            past_key_values=dynamic_cache).past_key_values
 
     model = AutoTopkModelForCausalLM.from_pretrained(
         "/fs/nexus-scratch/ryansynk/.cache/huggingface/hub/models--gradientai--Llama-3-8B-Instruct-1048k/snapshots/8697fb25cb77c852311e03b4464b8467471d56a4/",
@@ -65,6 +74,10 @@ def test_generate_topk():
     with torch.no_grad():
         topk_cache = topk_decoding.convert_cache_to_topk(dynamic_cache.to("cpu"))
         prompt_inputs = tokenizer(context + prompt, return_tensors="pt").to("cuda")
+        topk_cache_position = torch.arange(
+            context_inputs.input_ids.shape[-1],
+            prompt_inputs.input_ids.shape[-1],
+        )
         outputs = model.generate(
             **prompt_inputs, 
             max_new_tokens=5, 
@@ -72,10 +85,20 @@ def test_generate_topk():
             num_beams=1,
             use_cache=True,
             past_key_values=topk_cache,
+            cache_position=topk_cache_position,
+            return_dict_in_generate=True,
+            output_hidden_states=True
         )
 
-    output_str_true = tokenizer.decode(outputs_true[0])
-    output_str = tokenizer.decode(outputs[0])
+    output_str_true = tokenizer.decode(outputs_true.sequences[0])
+    output_str = tokenizer.decode(outputs.sequences[0])
+    for l in range(len(model.model.layers) + 1):
+        true_hs = outputs_true.hidden_states[0][l]
+        hs = outputs.hidden_states[0][l]
+        max_abs_err = torch.max(torch.abs(true_hs - hs))
+        max_rel_err = torch.max(torch.abs(true_hs - hs) / torch.abs(true_hs))
+        print(f"Layer: {l}, Max Abs Err: {max_abs_err}, Max Rel Err: {max_rel_err}")
+
     debug_str = "\nEXPECTED OUTPUT:\n" + output_str_true + "\nTOPK OUTPUT:\n" + output_str
     assert torch.equal(outputs_true[0], outputs[0]), debug_str
 

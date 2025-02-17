@@ -282,6 +282,8 @@ class TopkAttention(nn.Module):
 
         past_key_value = getattr(self, "past_key_value", past_key_value)
         cos, sin = position_embeddings
+        from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         # "prefix" elements are key or value tensors that are computed offline in a "construct" phase.
         # "suffix" elements are keys/values produced at generation time, or from a "query" that is appended to the text
@@ -331,6 +333,7 @@ class TopkAttention(nn.Module):
         attn_weights = None
 
         attn_output = attn_output.to(device)
+        attn_output = einops.rearrange(attn_output, "B H N D -> B N H D")
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
         #attn_output = attn_output.transpose(1, 2).contiguous()
