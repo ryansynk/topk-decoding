@@ -1,19 +1,32 @@
 import functools
+import inspect
 import types
 
 from transformers import AutoConfig, AutoModelForCausalLM
 from topk_decoding.monkey_patch import MODEL_TYPE_TO_APPLY_TOPK_FN, _apply_topk_attn
 from topk_decoding.topk_attn import TopkAttention
 
+
 def _get_model_config(model_dir, **model_init_kwargs):
     config = AutoConfig.from_pretrained(model_dir, **model_init_kwargs)
     return config
 
+
 def _topk_generate(self, *args, **kwargs):
-    k = kwargs.pop("k")
-    for idx, layer in enumerate(self.model.layers):
-        layer.self_attn.topk_k = k
+    k = kwargs.pop("k", None)
+    if k is None:
+        raise ValueError("k not given!")
+    else:
+        for idx, layer in enumerate(self.model.layers):
+            layer.self_attn.topk_k = k
+
+    num_mlp_splits = kwargs.pop("num_mlp_splits", None)
+    if num_mlp_splits is not None:
+        for idx, layer in enumerate(self.model.layers):
+            layer.mlp.num_mlp_splits = num_mlp_splits
+
     return self.original_generate(*args, **kwargs)
+
 
 class AutoTopkModelForCausalLM(AutoModelForCausalLM):
     """
@@ -30,9 +43,17 @@ class AutoTopkModelForCausalLM(AutoModelForCausalLM):
 
         _apply_topk_attn(model_type, **kwargs)
 
+        apply_fn = MODEL_TYPE_TO_APPLY_TOPK_FN[model_type]
+        apply_fn_signature = inspect.signature(apply_fn)
+        applicable_kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key not in apply_fn_signature.parameters
+        }
         model = super().from_pretrained(
-            pretrained_model_name_or_path, *model_args, **kwargs
+            pretrained_model_name_or_path, *model_args, **applicable_kwargs
         )
         model.original_generate = model.generate
         model.generate = types.MethodType(_topk_generate, model)
+
         return model

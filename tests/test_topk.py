@@ -62,14 +62,24 @@ def get_true_outputs(
 
 
 def get_topk_outputs(
-    context_inputs, prompt_inputs, context, prompt, model_str, tokenizer, dynamic_cache
+    context_inputs,
+    prompt_inputs,
+    context,
+    prompt,
+    model_str,
+    tokenizer,
+    dynamic_cache,
+    mlp=False,
 ):
     model = AutoTopkModelForCausalLM.from_pretrained(
-        model_str,
-        torch_dtype=torch.bfloat16,
+        model_str, torch_dtype=torch.bfloat16, mlp=mlp
     ).to("cuda")
     model = model.eval()
     with torch.no_grad():
+        topk_kwargs = {}
+        topk_kwargs["k"] = context_inputs.input_ids.shape[-1]
+        if mlp:
+            topk_kwargs["num_mlp_splits"] = 4
         topk_cache = topk_decoding.convert_cache_to_topk(dynamic_cache.to("cpu"))
         context_prompt_inputs = tokenizer(context + prompt, return_tensors="pt").to(
             "cuda"
@@ -82,7 +92,7 @@ def get_topk_outputs(
             num_beams=1,
             past_key_values=topk_cache,
             return_dict_in_generate=True,
-            k=context_inputs.input_ids.shape[-1],
+            **topk_kwargs,
         )
     return outputs
 
@@ -114,6 +124,44 @@ def test_generate_topk():
         model_str,
         tokenizer,
         dynamic_cache,
+    )
+    output_str_true = tokenizer.decode(outputs_true.sequences[0])
+    output_str = tokenizer.decode(outputs.sequences[0])
+
+    debug_str = (
+        "\nEXPECTED OUTPUT:\n" + output_str_true + "\nTOPK OUTPUT:\n" + output_str
+    )
+    assert torch.equal(outputs_true[0], outputs[0]), debug_str
+
+
+def test_generate_topk_and_unrolled_mlp():
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.use_deterministic_algorithms(True)
+    model_str = "gradientai/Llama-3-8B-Instruct-1048k"
+    tokenizer = AutoTokenizer.from_pretrained(model_str)
+    context = (
+        "In a lush, green forest, where the trees whispered secrets to the wind and the rivers sang "
+        "melodies of old, lived a clever fox named Felix and a wise turtle named Tessa. Felix was known "
+        "far and wide for his cunning ways, while Tessa was respected for her patience and wisdom. "
+        "One sunny morning, Felix was trotting through the forest, his mind buzzing with schemes, when "
+        "he stumbled upon Tessa slowly making her way across the path. "
+    )
+    prompt = "What happened next?"
+    context_inputs = tokenizer(context, return_tensors="pt")
+    prompt_inputs = tokenizer(context + prompt, return_tensors="pt")
+    dynamic_cache, outputs_true = get_true_outputs(
+        context_inputs, prompt_inputs, model_str, tokenizer
+    )
+    outputs = get_topk_outputs(
+        context_inputs,
+        prompt_inputs,
+        context,
+        prompt,
+        model_str,
+        tokenizer,
+        dynamic_cache,
+        mlp=True,
     )
     output_str_true = tokenizer.decode(outputs_true.sequences[0])
     output_str = tokenizer.decode(outputs.sequences[0])
