@@ -1,15 +1,19 @@
 import inspect
 import logging
 from topk_decoding.topk_attn import TopkAttention
+from topk_decoding.unrolled_mlp import UnrolledMLP
 
 logger = logging.getLogger(__name__)
 
 
-def apply_topk_to_llama() -> None:
+def apply_topk_to_llama(attn: bool = True, mlp: bool = False) -> None:
     from transformers.models.llama import modeling_llama
     from transformers.models.llama.modeling_llama import LlamaModel
 
-    modeling_llama.LlamaAttention = TopkAttention
+    if attn:
+        modeling_llama.LlamaAttention = TopkAttention
+    if mlp:
+        modeling_llama.LlamaMLP = UnrolledMLP
 
 
 MODEL_TYPE_TO_APPLY_TOPK_FN = {"llama": apply_topk_to_llama}
