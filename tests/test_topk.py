@@ -24,6 +24,69 @@ def test_import_convert_model_to_topk():
         )
 
 
+def get_true_outputs(
+    context_inputs, prompt_inputs, model_str, tokenizer, return_cache=True
+):
+    dynamic_cache = DynamicCache()
+    model = AutoModelForCausalLM.from_pretrained(
+        model_str,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
+    ).to("cuda")
+    model = model.eval()
+    context_inputs = context_inputs.to(model.device)
+    prompt_inputs = prompt_inputs.to(model.device)
+    function_outputs = ()
+    with torch.no_grad():
+        dynamic_cache = model(
+            **context_inputs, past_key_values=dynamic_cache
+        ).past_key_values
+        outputs_true = model.generate(
+            **prompt_inputs,
+            max_new_tokens=5,
+            do_sample=False,
+            num_beams=1,
+            past_key_values=dynamic_cache,
+            return_dict_in_generate=True,
+        )
+        # Have to re-make dynamic cache because it has tokens from generation added into it
+        if return_cache:
+            dynamic_cache = DynamicCache()
+            dynamic_cache = model(
+                **context_inputs, past_key_values=dynamic_cache
+            ).past_key_values
+            function_outputs = function_outputs + (dynamic_cache,)
+        function_outputs = function_outputs + (outputs_true,)
+
+    return function_outputs
+
+
+def get_topk_outputs(
+    context_inputs, prompt_inputs, context, prompt, model_str, tokenizer, dynamic_cache
+):
+    model = AutoTopkModelForCausalLM.from_pretrained(
+        model_str,
+        torch_dtype=torch.bfloat16,
+    ).to("cuda")
+    model = model.eval()
+    with torch.no_grad():
+        topk_cache = topk_decoding.convert_cache_to_topk(dynamic_cache.to("cpu"))
+        context_prompt_inputs = tokenizer(context + prompt, return_tensors="pt").to(
+            "cuda"
+        )
+        prompt_inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
+        outputs = model.generate(
+            **context_prompt_inputs,
+            max_new_tokens=5,
+            do_sample=False,
+            num_beams=1,
+            past_key_values=topk_cache,
+            return_dict_in_generate=True,
+            k=context_inputs.input_ids.shape[-1],
+        )
+    return outputs
+
+
 def test_generate_topk():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -40,65 +103,18 @@ def test_generate_topk():
     prompt = "What happened next?"
     context_inputs = tokenizer(context, return_tensors="pt")
     prompt_inputs = tokenizer(context + prompt, return_tensors="pt")
-    def get_true_outputs(context_inputs, prompt_inputs, model_str):
-        dynamic_cache = DynamicCache()
-        model = AutoModelForCausalLM.from_pretrained(
-            model_str,
-            torch_dtype=torch.bfloat16,
-            attn_implementation="eager",
-        ).to("cuda")
-        model = model.eval()
-        context_inputs = context_inputs.to(model.device)
-        prompt_inputs = prompt_inputs.to(model.device)
-        with torch.no_grad():
-            dynamic_cache = model(
-                **context_inputs, past_key_values=dynamic_cache
-            ).past_key_values
-            outputs_true = model.generate(
-                **prompt_inputs,
-                max_new_tokens=5,
-                do_sample=False,
-                num_beams=1,
-                past_key_values=dynamic_cache,
-                return_dict_in_generate=True,
-                output_hidden_states=True,
-            )
-            # Have to re-make dynamic cache because it has tokens from generation added into it
-            dynamic_cache = DynamicCache()
-            dynamic_cache = model(
-                **context_inputs, past_key_values=dynamic_cache
-            ).past_key_values
-        return dynamic_cache, outputs_true
-
-    def get_topk_outputs(context_inputs, prompt_inputs, model_str, dynamic_cache):
-        model = AutoTopkModelForCausalLM.from_pretrained(
-            model_str,
-            torch_dtype=torch.bfloat16,
-        ).to("cuda")
-        model = model.eval()
-        with torch.no_grad():
-            topk_cache = topk_decoding.convert_cache_to_topk(dynamic_cache.to("cpu"))
-            prompt_inputs = tokenizer(context + prompt, return_tensors="pt").to("cuda")
-            topk_cache_position = torch.arange(
-                context_inputs.input_ids.shape[-1],
-                prompt_inputs.input_ids.shape[-1],
-            )
-            outputs = model.generate(
-                **prompt_inputs,
-                max_new_tokens=5,
-                do_sample=False,
-                num_beams=1,
-                use_cache=True,
-                past_key_values=topk_cache,
-                cache_position=topk_cache_position,
-                return_dict_in_generate=True,
-                output_hidden_states=True,
-                k=context_inputs.input_ids.shape[-1]
-            )
-        return outputs
-
-    dynamic_cache, outputs_true = get_true_outputs(context_inputs, prompt_inputs, model_str)
-    outputs = get_topk_outputs(context_inputs, prompt_inputs, model_str, dynamic_cache)
+    dynamic_cache, outputs_true = get_true_outputs(
+        context_inputs, prompt_inputs, model_str, tokenizer
+    )
+    outputs = get_topk_outputs(
+        context_inputs,
+        prompt_inputs,
+        context,
+        prompt,
+        model_str,
+        tokenizer,
+        dynamic_cache,
+    )
     output_str_true = tokenizer.decode(outputs_true.sequences[0])
     output_str = tokenizer.decode(outputs.sequences[0])
 
