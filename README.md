@@ -6,3 +6,9 @@ This codebase is currently under construction and the API is subject to large ch
 
 ## Tests
 To run tests, ensure that pytest is installed with `pip install pytest`. Once pytest is installed (and the package itself is installed) simply invoke the command `pytest` from the top-level directory.
+
+## Todo
+- Make AutoTopk able to be generated with instantiated model
+- Import TopkCache directly, with multiple constructors
+- Default k to full context if no k is given with a warning
+- Make tests better and more isolated
