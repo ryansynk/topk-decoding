@@ -59,6 +59,8 @@ def model(model_str):
         attn_implementation="eager",
     ).to("cuda")
     model = model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
     yield model
     model.cpu()
     del model
@@ -75,6 +77,8 @@ def model_with_split_mlp(model_str):
         attn=False,
     ).to("cuda")
     model = model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
     yield model
     model.cpu()
     del model
@@ -88,6 +92,8 @@ def topk_model(model_str):
         torch_dtype=torch.bfloat16,
     ).to("cuda")
     model = model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
     yield model
     model.cpu()
     del model
@@ -100,6 +106,8 @@ def topk_model_with_split_mlp(model_str):
         model_str, torch_dtype=torch.bfloat16, mlp=True
     ).to("cuda")
     model = model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
     yield model
     model.cpu()
     del model
@@ -107,18 +115,22 @@ def topk_model_with_split_mlp(model_str):
 
 
 @pytest.fixture
-def true_outputs(context_prompt_inputs, model, true_cache):
-    context_prompt_inputs = context_prompt_inputs.to(model.device)
-    with torch.no_grad():
-        outputs_true = model.generate(
-            **context_prompt_inputs,
-            max_new_tokens=5,
-            do_sample=False,
-            num_beams=1,
-            return_dict_in_generate=True,
-            past_key_values=true_cache,
-        )
-    return outputs_true
+def topk_model_from_base(model_str):
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_str,
+        torch_dtype=torch.bfloat16,
+    )
+    model = AutoTopkModelForCausalLM.from_pretrained(
+        model_str, torch_dtype=torch.bfloat16, model=base_model
+    ).to("cuda")
+    model = model.eval()
+    model.generation_config.temperature = None
+    model.generation_config.top_p = None
+    yield model
+    model.cpu()
+    del model
+    del base_model
+    torch.cuda.empty_cache()
 
 
 @pytest.fixture
@@ -152,9 +164,23 @@ def split_mlp_cache(
 
 
 @pytest.fixture
-def topk_outputs_true_cache(
-    context_inputs, context_prompt_inputs, topk_model, true_cache
-):
+def true_outputs(context_prompt_inputs, model, true_cache):
+    context_prompt_inputs = context_prompt_inputs.to(model.device)
+    with torch.no_grad():
+        outputs_true = model.generate(
+            **context_prompt_inputs,
+            max_new_tokens=5,
+            do_sample=False,
+            num_beams=1,
+            return_dict_in_generate=True,
+            past_key_values=true_cache,
+        )
+    return outputs_true
+
+
+@pytest.fixture(params=["topk_model", "topk_model_from_base"])
+def topk_outputs_true_cache(request, context_inputs, context_prompt_inputs, true_cache):
+    topk_model = request.getfixturevalue(request.param)
     context_prompt_inputs = context_prompt_inputs.to(topk_model.device)
     topk_cache = TopkCache.from_dynamic_cache(true_cache.to("cpu"))
     with torch.no_grad():

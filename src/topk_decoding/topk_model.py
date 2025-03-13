@@ -31,10 +31,14 @@ class AutoTopkModelForCausalLM(AutoModelForCausalLM):
             for key, value in kwargs.items()
             if key not in apply_fn_signature.parameters
         }
+        base_model = kwargs.pop("model", None)
+        if base_model is None:
+            model = super().from_pretrained(
+                pretrained_model_name_or_path, *model_args, **applicable_kwargs
+            )
+        else:
+            model = base_model
 
-        model = super().from_pretrained(
-            pretrained_model_name_or_path, *model_args, **applicable_kwargs
-        )
         _apply_topk_attn(model, model_type, **kwargs)
 
         return model
