@@ -1,10 +1,9 @@
 import os
 import pytest
 import torch
-import topk_decoding
-from topk_decoding import topk_decoding
+from topk_decoding import AutoTopkModelForCausalLM, TopkCache
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
-from topk_decoding.topk_model import AutoTopkModelForCausalLM
+
 
 @pytest.fixture(autouse=True)
 def environment():
@@ -12,13 +11,16 @@ def environment():
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
     torch.use_deterministic_algorithms(True)
 
+
 @pytest.fixture
 def model_str():
     return "gradientai/Llama-3-8B-Instruct-1048k"
 
+
 @pytest.fixture
 def tokenizer(model_str):
     return AutoTokenizer.from_pretrained(model_str)
+
 
 @pytest.fixture
 def context():
@@ -31,19 +33,23 @@ def context():
     )
     return context
 
+
 @pytest.fixture
 def context_inputs(context, tokenizer):
     context_inputs = tokenizer(context, return_tensors="pt")
     return context_inputs
 
+
 @pytest.fixture
 def prompt():
     return "What happened next?"
+
 
 @pytest.fixture
 def context_prompt_inputs(context, prompt, tokenizer):
     context_prompt_inputs = tokenizer(context + prompt, return_tensors="pt")
     return context_prompt_inputs
+
 
 @pytest.fixture
 def model(model_str):
@@ -58,6 +64,7 @@ def model(model_str):
     del model
     torch.cuda.empty_cache()
 
+
 @pytest.fixture
 def model_with_split_mlp(model_str):
     model = AutoTopkModelForCausalLM.from_pretrained(
@@ -65,13 +72,14 @@ def model_with_split_mlp(model_str):
         torch_dtype=torch.bfloat16,
         attn_implementation="eager",
         mlp=True,
-        attn=False
+        attn=False,
     ).to("cuda")
     model = model.eval()
     yield model
     model.cpu()
     del model
     torch.cuda.empty_cache()
+
 
 @pytest.fixture
 def topk_model(model_str):
@@ -85,12 +93,11 @@ def topk_model(model_str):
     del model
     torch.cuda.empty_cache()
 
+
 @pytest.fixture
 def topk_model_with_split_mlp(model_str):
     model = AutoTopkModelForCausalLM.from_pretrained(
-        model_str,
-        torch_dtype=torch.bfloat16,
-        mlp=True
+        model_str, torch_dtype=torch.bfloat16, mlp=True
     ).to("cuda")
     model = model.eval()
     yield model
@@ -98,10 +105,9 @@ def topk_model_with_split_mlp(model_str):
     del model
     torch.cuda.empty_cache()
 
+
 @pytest.fixture
-def true_outputs(
-    context_prompt_inputs, model, true_cache
-):
+def true_outputs(context_prompt_inputs, model, true_cache):
     context_prompt_inputs = context_prompt_inputs.to(model.device)
     with torch.no_grad():
         outputs_true = model.generate(
@@ -114,9 +120,11 @@ def true_outputs(
         )
     return outputs_true
 
+
 @pytest.fixture
 def true_cache(
-    context_inputs, model, 
+    context_inputs,
+    model,
 ):
     context_inputs = context_inputs.to(model.device)
     dynamic_cache = DynamicCache()
@@ -125,9 +133,11 @@ def true_cache(
     ).past_key_values
     return dynamic_cache
 
+
 @pytest.fixture
 def split_mlp_cache(
-    context_inputs, model_with_split_mlp,
+    context_inputs,
+    model_with_split_mlp,
 ):
     context_inputs = context_inputs.to(model_with_split_mlp.device)
     dynamic_cache = DynamicCache()
@@ -140,12 +150,13 @@ def split_mlp_cache(
     ).past_key_values
     return dynamic_cache
 
+
 @pytest.fixture
 def topk_outputs_true_cache(
     context_inputs, context_prompt_inputs, topk_model, true_cache
 ):
     context_prompt_inputs = context_prompt_inputs.to(topk_model.device)
-    topk_cache = topk_decoding.convert_cache_to_topk(true_cache.to("cpu"))
+    topk_cache = TopkCache.from_dynamic_cache(true_cache.to("cpu"))
     with torch.no_grad():
         outputs_topk = topk_model.generate(
             **context_prompt_inputs,
@@ -154,16 +165,17 @@ def topk_outputs_true_cache(
             num_beams=1,
             return_dict_in_generate=True,
             past_key_values=topk_cache,
-            k=context_inputs.input_ids.shape[-1]
+            k=context_inputs.input_ids.shape[-1],
         )
     return outputs_topk
 
+
 @pytest.fixture
 def topk_outputs_split_mlp_cache(
-    context_inputs, context_prompt_inputs, topk_model, split_mlp_cache 
+    context_inputs, context_prompt_inputs, topk_model, split_mlp_cache
 ):
     context_prompt_inputs = context_prompt_inputs.to(topk_model.device)
-    topk_cache = topk_decoding.convert_cache_to_topk(split_mlp_cache.to("cpu"))
+    topk_cache = TopkCache.from_dynamic_cache(split_mlp_cache.to("cpu"))
     with torch.no_grad():
         outputs_topk = topk_model.generate(
             **context_prompt_inputs,
@@ -172,24 +184,24 @@ def topk_outputs_split_mlp_cache(
             num_beams=1,
             return_dict_in_generate=True,
             past_key_values=topk_cache,
-            k=context_inputs.input_ids.shape[-1]
+            k=context_inputs.input_ids.shape[-1],
         )
     return outputs_topk
+
 
 def test_topk_generate_true_cache(topk_outputs_true_cache, true_outputs, tokenizer):
     true_str = tokenizer.decode(true_outputs.sequences[0])
     topk_str = tokenizer.decode(topk_outputs_true_cache.sequences[0])
 
-    debug_str = (
-        "\nEXPECTED OUTPUT:\n" + true_str + "\nTOPK OUTPUT:\n" + topk_str
-    )
+    debug_str = "\nEXPECTED OUTPUT:\n" + true_str + "\nTOPK OUTPUT:\n" + topk_str
     assert torch.equal(true_outputs[0], topk_outputs_true_cache[0]), debug_str
 
-def test_topk_generate_split_mlp_cache(topk_outputs_split_mlp_cache, true_outputs, tokenizer):
+
+def test_topk_generate_split_mlp_cache(
+    topk_outputs_split_mlp_cache, true_outputs, tokenizer
+):
     true_str = tokenizer.decode(true_outputs.sequences[0])
     topk_str = tokenizer.decode(topk_outputs_split_mlp_cache.sequences[0])
 
-    debug_str = (
-        "\nEXPECTED OUTPUT:\n" + true_str + "\nTOPK OUTPUT:\n" + topk_str 
-    )
+    debug_str = "\nEXPECTED OUTPUT:\n" + true_str + "\nTOPK OUTPUT:\n" + topk_str
     assert torch.equal(true_outputs[0], topk_outputs_split_mlp_cache[0]), debug_str
