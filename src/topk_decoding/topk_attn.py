@@ -37,41 +37,10 @@ def repeat_kv_db(faiss_cache_db: List[Tuple], n_rep: int) -> List[Tuple]:
 class TopkAttention(nn.Module):
     """Topk attention mechanism"""
 
-    def __init__(self, config, layer_idx):
+    def __init__(self, original_attn):
         super().__init__()
-        self.config = config
-        self.layer_idx = layer_idx
-        self.head_dim = getattr(
-            config, "head_dim", config.hidden_size // config.num_attention_heads
-        )
-        self.num_key_value_groups = (
-            config.num_attention_heads // config.num_key_value_heads
-        )
-        self.scaling = self.head_dim**-0.5
-        self.attention_dropout = config.attention_dropout
-        self.is_causal = True
         self.topk_k = None
-
-        self.q_proj = nn.Linear(
-            config.hidden_size,
-            config.num_attention_heads * self.head_dim,
-            bias=config.attention_bias,
-        )
-        self.k_proj = nn.Linear(
-            config.hidden_size,
-            config.num_key_value_heads * self.head_dim,
-            bias=config.attention_bias,
-        )
-        self.v_proj = nn.Linear(
-            config.hidden_size,
-            config.num_key_value_heads * self.head_dim,
-            bias=config.attention_bias,
-        )
-        self.o_proj = nn.Linear(
-            config.num_attention_heads * self.head_dim,
-            config.hidden_size,
-            bias=config.attention_bias,
-        )
+        self.original_attn = original_attn
 
     @staticmethod
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
@@ -236,14 +205,20 @@ class TopkAttention(nn.Module):
         bsz, q_len, _ = hidden_states.size()
         assert not output_attentions, "attentions not generated using faiss"
         input_shape = hidden_states.shape[:-1]
-        hidden_shape = (*input_shape, -1, self.head_dim)
+        hidden_shape = (*input_shape, -1, self.original_attn.head_dim)
 
-        query_states = self.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        key_states = self.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-        value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        query_states = (
+            self.original_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
+        key_states = (
+            self.original_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
+        value_states = (
+            self.original_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+        )
 
-        _, self.num_heads, _, _ = query_states.shape
-        _, self.num_key_value_heads, _, _ = key_states.shape
+        _, self.original_attn.num_heads, _, _ = query_states.shape
+        _, self.original_attn.num_key_value_heads, _, _ = key_states.shape
 
         past_key_value = getattr(self, "past_key_value", past_key_value)
         cos, sin = position_embeddings
@@ -265,21 +240,31 @@ class TopkAttention(nn.Module):
             "cos": cos,
             "cache_position": cache_position,
         }
-        num_prev_seen_tokens = past_key_value.get_seq_length(self.layer_idx)
+        num_prev_seen_tokens = past_key_value.get_seq_length(
+            self.original_attn.layer_idx
+        )
         (prefix_key_db, suffix_key_states), (
             prefix_value_states,
             suffix_value_states,
         ) = past_key_value.update(
-            key_states, value_states, self.layer_idx, cache_kwargs
+            key_states, value_states, self.original_attn.layer_idx, cache_kwargs
         )
         if prefix_value_states.ndim == 3:
             prefix_value_states = einops.rearrange(
                 prefix_value_states, "n h d -> 1 n h d"
             )
-        prefix_key_db = repeat_kv_db(prefix_key_db, self.num_key_value_groups)
-        prefix_value_states = repeat_kv(prefix_value_states, self.num_key_value_groups)
-        suffix_key_states = repeat_kv(suffix_key_states, self.num_key_value_groups)
-        suffix_value_states = repeat_kv(suffix_value_states, self.num_key_value_groups)
+        prefix_key_db = repeat_kv_db(
+            prefix_key_db, self.original_attn.num_key_value_groups
+        )
+        prefix_value_states = repeat_kv(
+            prefix_value_states, self.original_attn.num_key_value_groups
+        )
+        suffix_key_states = repeat_kv(
+            suffix_key_states, self.original_attn.num_key_value_groups
+        )
+        suffix_value_states = repeat_kv(
+            suffix_value_states, self.original_attn.num_key_value_groups
+        )
 
         # Note that suffix key/value states are empty tensors that go unused if construct_mode=True
         device = query_states.device
@@ -291,9 +276,9 @@ class TopkAttention(nn.Module):
             prefix_key_db,
             prefix_value_states,
             bsz,
-            self.num_heads,
-            self.num_key_value_heads,
-            self.num_key_value_groups,
+            self.original_attn.num_heads,
+            self.original_attn.num_key_value_heads,
+            self.original_attn.num_key_value_groups,
             num_prev_seen_tokens=num_prev_seen_tokens,
         )
         attn_weights = None
@@ -301,6 +286,6 @@ class TopkAttention(nn.Module):
         attn_output = attn_output.to(device)
         attn_output = einops.rearrange(attn_output, "B H N D -> B N H D")
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.original_attn.o_proj(attn_output)
 
         return attn_output, attn_weights

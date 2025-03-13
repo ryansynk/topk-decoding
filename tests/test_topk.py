@@ -6,167 +6,190 @@ from topk_decoding import topk_decoding
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 from topk_decoding.topk_model import AutoTopkModelForCausalLM
 
+@pytest.fixture(autouse=True)
+def environment():
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+    torch.use_deterministic_algorithms(True)
 
-def test_import_convert_cache_to_topk():
-    with pytest.raises(NotImplementedError) as e_info:
-        topk_decoding.convert_cache_to_topk(None)
+@pytest.fixture
+def model_str():
+    return "gradientai/Llama-3-8B-Instruct-1048k"
 
+@pytest.fixture
+def tokenizer(model_str):
+    return AutoTokenizer.from_pretrained(model_str)
 
-def test_import_convert_model_to_topk():
-    model = AutoModelForCausalLM.from_pretrained(
-        "/fs/nexus-scratch/ryansynk/.cache/huggingface/hub/models--gradientai--Llama-3-8B-Instruct-1048k/snapshots/8697fb25cb77c852311e03b4464b8467471d56a4/",
-        torch_dtype=torch.bfloat16,
-    ).to("cuda")
-    model = topk_decoding.convert_model_to_topk(model)
-    for layer in model.model.layers:
-        assert isinstance(layer.self_attn, topk_decoding.TopkAttention), type(
-            layer.self_attn
-        )
+@pytest.fixture
+def context():
+    context = (
+        "In a lush, green forest, where the trees whispered secrets to the wind and the rivers sang "
+        "melodies of old, lived a clever fox named Felix and a wise turtle named Tessa. Felix was known "
+        "far and wide for his cunning ways, while Tessa was respected for her patience and wisdom. "
+        "One sunny morning, Felix was trotting through the forest, his mind buzzing with schemes, when "
+        "he stumbled upon Tessa slowly making her way across the path. "
+    )
+    return context
 
+@pytest.fixture
+def context_inputs(context, tokenizer):
+    context_inputs = tokenizer(context, return_tensors="pt")
+    return context_inputs
 
-def get_true_outputs(
-    context_inputs, prompt_inputs, model_str, tokenizer, return_cache=True
-):
-    dynamic_cache = DynamicCache()
+@pytest.fixture
+def prompt():
+    return "What happened next?"
+
+@pytest.fixture
+def context_prompt_inputs(context, prompt, tokenizer):
+    context_prompt_inputs = tokenizer(context + prompt, return_tensors="pt")
+    return context_prompt_inputs
+
+@pytest.fixture
+def model(model_str):
     model = AutoModelForCausalLM.from_pretrained(
         model_str,
         torch_dtype=torch.bfloat16,
         attn_implementation="eager",
     ).to("cuda")
     model = model.eval()
-    context_inputs = context_inputs.to(model.device)
-    prompt_inputs = prompt_inputs.to(model.device)
-    function_outputs = ()
-    with torch.no_grad():
-        dynamic_cache = model(
-            **context_inputs, past_key_values=dynamic_cache
-        ).past_key_values
-        outputs_true = model.generate(
-            **prompt_inputs,
-            max_new_tokens=5,
-            do_sample=False,
-            num_beams=1,
-            past_key_values=dynamic_cache,
-            return_dict_in_generate=True,
-        )
-        # Have to re-make dynamic cache because it has tokens from generation added into it
-        if return_cache:
-            dynamic_cache = DynamicCache()
-            dynamic_cache = model(
-                **context_inputs, past_key_values=dynamic_cache
-            ).past_key_values
-            function_outputs = function_outputs + (dynamic_cache,)
-        function_outputs = function_outputs + (outputs_true,)
+    yield model
+    model.cpu()
+    del model
+    torch.cuda.empty_cache()
 
-    return function_outputs
-
-
-def get_topk_outputs(
-    context_inputs,
-    prompt_inputs,
-    context,
-    prompt,
-    model_str,
-    tokenizer,
-    dynamic_cache,
-    mlp=False,
-):
+@pytest.fixture
+def model_with_split_mlp(model_str):
     model = AutoTopkModelForCausalLM.from_pretrained(
-        model_str, torch_dtype=torch.bfloat16, mlp=mlp
+        model_str,
+        torch_dtype=torch.bfloat16,
+        attn_implementation="eager",
+        mlp=True,
+        attn=False
     ).to("cuda")
     model = model.eval()
+    yield model
+    model.cpu()
+    del model
+    torch.cuda.empty_cache()
+
+@pytest.fixture
+def topk_model(model_str):
+    model = AutoTopkModelForCausalLM.from_pretrained(
+        model_str,
+        torch_dtype=torch.bfloat16,
+    ).to("cuda")
+    model = model.eval()
+    yield model
+    model.cpu()
+    del model
+    torch.cuda.empty_cache()
+
+@pytest.fixture
+def topk_model_with_split_mlp(model_str):
+    model = AutoTopkModelForCausalLM.from_pretrained(
+        model_str,
+        torch_dtype=torch.bfloat16,
+        mlp=True
+    ).to("cuda")
+    model = model.eval()
+    yield model
+    model.cpu()
+    del model
+    torch.cuda.empty_cache()
+
+@pytest.fixture
+def true_outputs(
+    context_prompt_inputs, model, true_cache
+):
+    context_prompt_inputs = context_prompt_inputs.to(model.device)
     with torch.no_grad():
-        topk_kwargs = {}
-        topk_kwargs["k"] = context_inputs.input_ids.shape[-1]
-        if mlp:
-            topk_kwargs["num_mlp_splits"] = 4
-        topk_cache = topk_decoding.convert_cache_to_topk(dynamic_cache.to("cpu"))
-        context_prompt_inputs = tokenizer(context + prompt, return_tensors="pt").to(
-            "cuda"
-        )
-        prompt_inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-        outputs = model.generate(
+        outputs_true = model.generate(
             **context_prompt_inputs,
             max_new_tokens=5,
             do_sample=False,
             num_beams=1,
-            past_key_values=topk_cache,
             return_dict_in_generate=True,
-            **topk_kwargs,
+            past_key_values=true_cache,
         )
-    return outputs
+    return outputs_true
 
+@pytest.fixture
+def true_cache(
+    context_inputs, model, 
+):
+    context_inputs = context_inputs.to(model.device)
+    dynamic_cache = DynamicCache()
+    dynamic_cache = model(
+        **context_inputs, past_key_values=dynamic_cache
+    ).past_key_values
+    return dynamic_cache
 
-def test_generate_topk():
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    torch.use_deterministic_algorithms(True)
-    model_str = "gradientai/Llama-3-8B-Instruct-1048k"
-    tokenizer = AutoTokenizer.from_pretrained(model_str)
-    context = (
-        "In a lush, green forest, where the trees whispered secrets to the wind and the rivers sang "
-        "melodies of old, lived a clever fox named Felix and a wise turtle named Tessa. Felix was known "
-        "far and wide for his cunning ways, while Tessa was respected for her patience and wisdom. "
-        "One sunny morning, Felix was trotting through the forest, his mind buzzing with schemes, when "
-        "he stumbled upon Tessa slowly making her way across the path. "
-    )
-    prompt = "What happened next?"
-    context_inputs = tokenizer(context, return_tensors="pt")
-    prompt_inputs = tokenizer(context + prompt, return_tensors="pt")
-    dynamic_cache, outputs_true = get_true_outputs(
-        context_inputs, prompt_inputs, model_str, tokenizer
-    )
-    outputs = get_topk_outputs(
-        context_inputs,
-        prompt_inputs,
-        context,
-        prompt,
-        model_str,
-        tokenizer,
-        dynamic_cache,
-    )
-    output_str_true = tokenizer.decode(outputs_true.sequences[0])
-    output_str = tokenizer.decode(outputs.sequences[0])
+@pytest.fixture
+def split_mlp_cache(
+    context_inputs, model_with_split_mlp,
+):
+    context_inputs = context_inputs.to(model_with_split_mlp.device)
+    dynamic_cache = DynamicCache()
+    dynamic_cache = model_with_split_mlp.generate(
+        **context_inputs,
+        max_new_tokens=1,
+        do_sample=False,
+        num_beams=1,
+        return_dict_in_generate=True,
+    ).past_key_values
+    return dynamic_cache
 
-    debug_str = (
-        "\nEXPECTED OUTPUT:\n" + output_str_true + "\nTOPK OUTPUT:\n" + output_str
-    )
-    assert torch.equal(outputs_true[0], outputs[0]), debug_str
+@pytest.fixture
+def topk_outputs_true_cache(
+    context_inputs, context_prompt_inputs, topk_model, true_cache
+):
+    context_prompt_inputs = context_prompt_inputs.to(topk_model.device)
+    topk_cache = topk_decoding.convert_cache_to_topk(true_cache.to("cpu"))
+    with torch.no_grad():
+        outputs_topk = topk_model.generate(
+            **context_prompt_inputs,
+            max_new_tokens=5,
+            do_sample=False,
+            num_beams=1,
+            return_dict_in_generate=True,
+            past_key_values=topk_cache,
+            k=context_inputs.input_ids.shape[-1]
+        )
+    return outputs_topk
 
+@pytest.fixture
+def topk_outputs_split_mlp_cache(
+    context_inputs, context_prompt_inputs, topk_model, split_mlp_cache 
+):
+    context_prompt_inputs = context_prompt_inputs.to(topk_model.device)
+    topk_cache = topk_decoding.convert_cache_to_topk(split_mlp_cache.to("cpu"))
+    with torch.no_grad():
+        outputs_topk = topk_model.generate(
+            **context_prompt_inputs,
+            max_new_tokens=5,
+            do_sample=False,
+            num_beams=1,
+            return_dict_in_generate=True,
+            past_key_values=topk_cache,
+            k=context_inputs.input_ids.shape[-1]
+        )
+    return outputs_topk
 
-def test_generate_topk_and_unrolled_mlp():
-    os.environ["TOKENIZERS_PARALLELISM"] = "false"
-    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
-    torch.use_deterministic_algorithms(True)
-    model_str = "gradientai/Llama-3-8B-Instruct-1048k"
-    tokenizer = AutoTokenizer.from_pretrained(model_str)
-    context = (
-        "In a lush, green forest, where the trees whispered secrets to the wind and the rivers sang "
-        "melodies of old, lived a clever fox named Felix and a wise turtle named Tessa. Felix was known "
-        "far and wide for his cunning ways, while Tessa was respected for her patience and wisdom. "
-        "One sunny morning, Felix was trotting through the forest, his mind buzzing with schemes, when "
-        "he stumbled upon Tessa slowly making her way across the path. "
-    )
-    prompt = "What happened next?"
-    context_inputs = tokenizer(context, return_tensors="pt")
-    prompt_inputs = tokenizer(context + prompt, return_tensors="pt")
-    dynamic_cache, outputs_true = get_true_outputs(
-        context_inputs, prompt_inputs, model_str, tokenizer
-    )
-    outputs = get_topk_outputs(
-        context_inputs,
-        prompt_inputs,
-        context,
-        prompt,
-        model_str,
-        tokenizer,
-        dynamic_cache,
-        mlp=True,
-    )
-    output_str_true = tokenizer.decode(outputs_true.sequences[0])
-    output_str = tokenizer.decode(outputs.sequences[0])
+def test_topk_generate_true_cache(topk_outputs_true_cache, true_outputs, tokenizer):
+    true_str = tokenizer.decode(true_outputs.sequences[0])
+    topk_str = tokenizer.decode(topk_outputs_true_cache.sequences[0])
 
     debug_str = (
-        "\nEXPECTED OUTPUT:\n" + output_str_true + "\nTOPK OUTPUT:\n" + output_str
+        "\nEXPECTED OUTPUT:\n" + true_str + "\nTOPK OUTPUT:\n" + topk_str
     )
-    assert torch.equal(outputs_true[0], outputs[0]), debug_str
+    assert torch.equal(true_outputs[0], topk_outputs_true_cache[0]), debug_str
+
+def test_topk_generate_split_mlp_cache(topk_outputs_split_mlp_cache, true_outputs, tokenizer):
+    true_str = tokenizer.decode(true_outputs.sequences[0])
+    topk_str = tokenizer.decode(topk_outputs_split_mlp_cache.sequences[0])
+
+    debug_str = (
+        "\nEXPECTED OUTPUT:\n" + true_str + "\nTOPK OUTPUT:\n" + topk_str 
+    )
+    assert torch.equal(true_outputs[0], topk_outputs_split_mlp_cache[0]), debug_str

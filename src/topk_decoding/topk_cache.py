@@ -154,7 +154,12 @@ class TopkCache(Cache):
             if flat:
                 search_index = faiss.IndexFlatIP(D)
                 search_index.add(
-                    key_states[i, :, :].contiguous().to(torch.float32).cpu()
+                    key_states[i, :, :]
+                    .contiguous()
+                    .to(torch.float32)
+                    .cpu()
+                    .detach()
+                    .numpy()
                 )
             else:
                 quantizer = faiss.IndexFlatIP(D)
@@ -246,7 +251,7 @@ class TopkCache(Cache):
 
     @staticmethod
     def save_cache_tensor(cache: "DynamicFaissCache", filepath: str) -> None:
-        # CHECK THAT FILE NAME IS LIKE WHATEVER VALID OR SOME SHIT
+        # Check filename is valid
         if not isinstance(filepath, str):
             raise ValueError("Filepath must be a string.")
 
