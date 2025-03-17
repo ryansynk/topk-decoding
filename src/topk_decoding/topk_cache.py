@@ -45,6 +45,9 @@ class TopkCache(Cache):
         self.flat = flat
         super().__init__()
 
+    def __len__(self) -> int:
+        return self.get_seq_length()
+
     def update(
         self,
         key_states: torch.Tensor,
