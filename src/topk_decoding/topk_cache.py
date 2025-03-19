@@ -170,7 +170,9 @@ class TopkCache(Cache):
                     nlists = int(math.ceil(math.sqrt(N)))
                 else:
                     nlists = int(math.ceil(N / 1000))
-                nprobes = int(math.ceil(nlists))
+
+                # TODO have some way of setting this?
+                nprobes = 4
 
                 search_index = faiss.IndexIVFFlat(
                     quantizer, D, nlists, faiss.METRIC_INNER_PRODUCT
@@ -409,11 +411,11 @@ class TopkCache(Cache):
         return cache
 
     @classmethod
-    def from_dynamic_cache(cls, dynamic_cache: DynamicCache):
+    def from_dynamic_cache(cls, dynamic_cache: DynamicCache, use_ivf: bool = False):
         cache = cls()
         key_cache = []
         for k in dynamic_cache.key_cache:
-            key_db = cls.create_key_database(k)
+            key_db = cls.create_key_database(k, flat=(not use_ivf))
             key_cache.append((key_db, torch.empty(0).cuda().to(k.dtype)))
         cache.key_cache = key_cache
 
