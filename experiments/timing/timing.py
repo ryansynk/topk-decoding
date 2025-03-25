@@ -5,7 +5,7 @@ import csv
 import torch
 import datasets
 from datetime import datetime
-from transformers import AutoModelForCausalLM, DynamicCache, AutoTokenizer
+from transformers import AutoModelForCausalLM, DynamicCache, OffloadedCache, AutoTokenizer
 from topk_decoding import AutoTopkModelForCausalLM, TopkCache
 
 
@@ -23,7 +23,7 @@ def get_args():
     parser.add_argument(
         "--decode_strategy",
         type=str,
-        choices=["full", "offload", "topk_flat", "topk_ivf", "streaming_llm"],
+        choices=["full", "offloaded", "topk_flat", "topk_ivf", "streaming_llm"],
         required=True,
     )
     parser.add_argument(
@@ -40,6 +40,7 @@ def get_args():
     )
     parser.add_argument("--k", type=int, default=None)
     parser.add_argument("--output_dir", type=str, default="outputs")
+    parser.add_argument("--device", type=str, required=True, help="Name of GPU being used. Required for logging purposes")
     return parser.parse_args()
 
 
@@ -73,21 +74,35 @@ def get_cache_path(args):
     path = os.path.join(path, "niah_single_1_plot/example_0/kv_cache.pt")
     return path
 
+def get_cache_full(cache_tensor):
+    cache = DynamicCache()
+    cache_tensor = cache_tensor.to("cuda")
+    cache.key_cache = [t.unsqueeze(0) for t in list(cache_tensor[0])]
+    cache.value_cache = [t.unsqueeze(0) for t in list(cache_tensor[1])]
+    cache._seen_tokens = cache_tensor.shape[-2]
+    cache = cache.to("cuda")
+    return cache
+
+def get_cache_offloaded(cache_tensor):
+    cache = OffloadedCache()
+    for l in range(cache_tensor.shape[1]):
+        keys = cache_tensor[0, l, :, :, :].to("cuda")
+        values = cache_tensor[1, l, :, :, :].to("cuda")
+        cache.update(keys, values, l)
+    return cache
+
 
 def get_cache(path, args):
     cache_tensor = torch.load(path)
     cache = DynamicCache()
     if args.decode_strategy == "full":
-        cache_tensor = cache_tensor.to("cuda")
-    cache.key_cache = [t.unsqueeze(0) for t in list(cache_tensor[0])]
-    cache.value_cache = [t.unsqueeze(0) for t in list(cache_tensor[1])]
-    cache._seen_tokens = cache_tensor.shape[-2]
+        cache = get_cache_full(cache_tensor)
     if args.decode_strategy == "topk_flat":
         cache = TopkCache.from_dynamic_cache(cache)
     elif args.decode_strategy == "topk_ivf":
         cache = TopkCache.from_dynamic_cache(cache, use_ivf=True)
-    elif args.decode_strategy == "full":
-        cache = cache.to("cuda")
+    elif args.decode_strategy == "offloaded":
+        get_cache_offloaded(cache_tensor)
     else:
         raise NotImplementedError
 
@@ -145,6 +160,7 @@ def write_output(args, cache_len, total_time, tokens_per_second, oom):
             "total_time",
             "tokens_per_second",
             "oom",
+            "device",
         ]
         line = [
             args.model,
@@ -154,6 +170,7 @@ def write_output(args, cache_len, total_time, tokens_per_second, oom):
             total_time,
             tokens_per_second,
             oom,
+            args.device,
         ]
         if args.decode_strategy in ["topk_flat", "topk_ivf"]:
             header.append("k")
@@ -170,7 +187,7 @@ def main():
     args = get_args()
 
     # Currently only expect args.decode_strategy to be "full" or "topk_flat"
-    if args.decode_strategy in ["offload", "streaming_llm"]:
+    if args.decode_strategy in ["streaming_llm"]:
         raise NotImplementedError
     dataset_path = os.path.join(
         args.dataset_dir, f"dataset_jsons/validation_{args.N}.jsonl"

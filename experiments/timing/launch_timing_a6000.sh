@@ -3,12 +3,12 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --mem=249G
-#SBATCH --gres=gpu:rtxa4000
-#SBATCH --partition=cml-dpart
-#SBATCH --qos=cml-very_high
-#SBATCH --account=cml-tomg
+#SBATCH --gres=gpu:rtxa6000
+#SBATCH --partition=vulcan-ramani
+#SBATCH --qos=vulcan-high_long
+#SBATCH --account=vulcan-ramani
 #SBATCH --output=logs/timing_experiment_%j.out
-#SBATCH --job-name=timing_experiment
+#SBATCH --job-name=timing_experiment_a6000
 
 # USAGE: sbatch launch_timing.sh <decoding_strategy> [<k>]
 
@@ -34,8 +34,8 @@ for N in 4096 8192 16384 32768 65536 131072
             echo "Error: <k> parameter is required for decoding_strategy '$decode_strategy'"
             exit 1
         fi
-        python timing.py --N=${N} --decode_strategy="$decode_strategy" --k="$k"
+        python timing.py --N=${N} --decode_strategy="$decode_strategy" --k="$k" --device="rtxa6000"
     else
-        python timing.py --N=${N} --decode_strategy="$decode_strategy"
+        python timing.py --N=${N} --decode_strategy="$decode_strategy" --device="rtxa6000"
     fi
   done
