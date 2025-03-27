@@ -29,7 +29,7 @@ k=$2
 # Loop over N values
 for N in 4096 8192 16384 32768 65536 131072
   do
-    if [[ "$decode_strategy" == "topk_full" || "$decode_strategy" == "topk_ivf" ]]; then
+    if [[ "$decode_strategy" == "topk_full" || "$decode_strategy" == "topk_ivf" || "$decode_strategy" == "streaming_llm" ]]; then
         if [ -z "$k" ]; then
             echo "Error: <k> parameter is required for decoding_strategy '$decode_strategy'"
             exit 1
