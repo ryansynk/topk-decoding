@@ -3,6 +3,7 @@ import faiss
 import torch
 import torch.nn.functional as F
 import einops
+import line_profiler
 from torch import nn
 from transformers.cache_utils import Cache
 from typing import List, Optional, Tuple, Union
@@ -43,6 +44,7 @@ class TopkAttention(nn.Module):
         self.original_attn = original_attn
 
     @staticmethod
+    @line_profiler.profile
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
         """Retrieve top-k values and indices using FAISS.
 
@@ -76,6 +78,7 @@ class TopkAttention(nn.Module):
         return faiss_values_tensor, faiss_indices_tensor
 
     @staticmethod
+    @line_profiler.profile
     def topk_attn(
         topk_k,
         query_states,
@@ -189,6 +192,7 @@ class TopkAttention(nn.Module):
 
         return xhat
 
+    @line_profiler.profile
     def forward(
         self,
         hidden_states: torch.Tensor,

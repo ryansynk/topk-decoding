@@ -172,7 +172,7 @@ class TopkCache(Cache):
                     nlists = int(math.ceil(N / 1000))
 
                 # TODO have some way of setting this?
-                nprobes = 4
+                nprobes = 8
 
                 search_index = faiss.IndexIVFFlat(
                     quantizer, D, nlists, faiss.METRIC_INNER_PRODUCT

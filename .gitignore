@@ -173,3 +173,4 @@ cython_debug/
 # Experiment data
 experiments/timing/outputs
 experiments/timing/logs
+experiments/timing/profile
