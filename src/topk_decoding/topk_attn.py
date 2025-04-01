@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 import einops
 import line_profiler
+import multiprocessing as mp
 from torch import nn
 from transformers.cache_utils import Cache
 from typing import List, Optional, Tuple, Union
@@ -71,6 +72,50 @@ class TopkAttention(nn.Module):
             )
             faiss_indices_tensor[i, :, :] = torch.tensor(
                 faiss_indices, dtype=faiss_indices_tensor.dtype
+            )
+
+        # Scale the dot products
+        faiss_values_tensor = faiss_values_tensor / math.sqrt(D)
+        return faiss_values_tensor, faiss_indices_tensor
+
+    @staticmethod
+    @line_profiler.profile
+    def get_topk_via_faiss_no_repeat(topk_k, query_states, key_databases, kv_heads, kv_groups):
+        """THIS IMPLEMENTATION IS WORSE FOR SOME REASON
+        
+        Retrieve top-k values and indices using FAISS.
+
+        Args:
+            topk_k (int): Number of top-k values to retrieve.
+            query_states (torch.Tensor): Query states tensor of shape (BH_q, N_q, D).
+            key_databases (list): List of FAISS search indexes. only num_key_heads of them
+            kv_heads (int): Number of key-value heads.
+            kv_groups (int): Number of key-value groups.
+
+        Returns:
+            torch.Tensor: Top-k normalized score values tensor of shape (BH, N_q, topk_k).
+            torch.Tensor: Top-k indices tensor of shape (BH, N_q, topk_k).
+        """
+        BH, N_q, D = query_states.shape
+        faiss_values_tensor = torch.zeros((BH, N_q, topk_k))
+        faiss_indices_tensor = torch.zeros((BH, N_q, topk_k), dtype=torch.int32)
+        faiss.omp_set_num_threads(32)
+        for i, search_index in enumerate(key_databases):
+            # Group all queries going to same key db together:
+            # (query_states[0]  ... query_states[3]) -> key_databases[0]
+            # (query_states[4]  ... query_states[7]) -> key_databases[1]
+            #                   ...
+            # (query_states[28] ... query_states[31])-> key_databases[7],
+            grouped_queries = query_states[i*kv_groups:(i + 1)*kv_groups, :, :].reshape(N_q * kv_groups, D)
+            faiss_values, faiss_indices = search_index.search(
+                grouped_queries.contiguous().to(torch.float32).cpu(), k=topk_k
+            ) 
+            # Un-groups the outputs and stores them in the tensor
+            faiss_values_tensor[i*kv_groups:(i+1)*kv_groups, :, :] = torch.tensor(
+                faiss_values.reshape(kv_groups, N_q, topk_k), dtype=faiss_values_tensor.dtype
+            )
+            faiss_indices_tensor[i*kv_groups:(i+1)*kv_groups, :, :] = torch.tensor(
+                faiss_indices.reshape(kv_groups, N_q, topk_k), dtype=faiss_indices_tensor.dtype
             )
 
         # Scale the dot products
@@ -192,6 +237,122 @@ class TopkAttention(nn.Module):
 
         return xhat
 
+
+    @staticmethod
+    @line_profiler.profile
+    def topk_attn_no_repeat_no_gather_no_loop(
+        topk_k,
+        query_states,
+        suffix_key_states,
+        suffix_value_states,
+        prefix_key_db,
+        prefix_value_states,
+        B,
+        H,
+        kv_heads,
+        kv_groups,
+        num_prev_seen_tokens=0,
+    ):
+        """Computes output of attention block in query phase of model
+
+        In the query phase, the databases from the forward pass in the construct phase have
+        already been created. Here we densely compute the attention of the suffix prompt
+        with itself, and use the databases to compute the attention of the suffix with
+        respect to the prefix.
+
+        Args:
+            topk_k (int): number of top-k entries to take
+            query_states (torch.Tensor): Query states tensor.
+            key_states (torch.Tensor): Key states tensor.
+            value_states (torch.Tensor): Value states tensor.
+            key_database (list): List of FAISS search indexes.
+            value_cache (torch.Tensor): Cached value states.
+            B (int): Batch size.
+            H (int): Number of heads.
+
+        Returns:
+            torch.Tensor: Output tensor of shape (B, H, N_q, D).
+        """
+        if len(query_states.shape) == 4:
+            _, _, N_q, D = query_states.shape
+            BH = B * H
+            query_states = einops.rearrange(query_states, "B H N D -> (B H) N D")
+            prefix_value_states = einops.rearrange(
+                prefix_value_states, "B H N D -> (B H) N D"
+            )
+        else:
+            BH, N_q, D = query_states.shape
+
+        N_k_prefix = prefix_key_db[0].ntotal
+        if topk_k > N_k_prefix:
+            topk_k = N_k_prefix
+
+        topk_values, topk_indices = TopkAttention.get_topk_via_faiss(
+            topk_k, query_states, prefix_key_db, kv_heads, kv_groups
+        )
+
+        # In query/generation mode we have to combine the prefix keys/values with suffix keys/values and that
+        # changes the masking and softmax computation.
+        try:
+            suffix_value_states = einops.rearrange(
+                suffix_value_states, "B H N D -> (B H) N D"
+            )
+            suffix_key_states = einops.rearrange(
+                suffix_key_states, "B H N D -> (B H) N D"
+            )
+        except (einops.EinopsError, RuntimeError) as e:
+            msg = f"Suffix key/value states must not be empty in query/generate mode. Got suffix_key_states: {suffix_key_states.shape if not suffix_key_states is None else type(suffix_key_states)}."
+            raise ValueError(msg) from e
+
+        topk_values_exp = torch.exp(topk_values.to(query_states.device).to(query_states.dtype))
+        topk_values_exp_sums = einops.reduce(
+            topk_values_exp, "BH N_q topk_k -> BH N_q", "sum"
+        )
+
+        score_dense = query_states @ suffix_key_states.mT / math.sqrt(D)
+
+        # Don't mask if there is only one token
+        if N_q > 1:
+            score_dense = score_dense + torch.triu(
+                torch.full_like(score_dense, float("-inf")), 1
+            )
+        score_dense_exp = torch.exp(score_dense)
+        score_dense_exp_sums = einops.reduce(
+            score_dense_exp, "BH N_q N_k -> BH N_q", "sum"
+        )
+        softmax_denominators = topk_values_exp_sums + score_dense_exp_sums
+
+        attn_dense = score_dense_exp / einops.repeat(
+            softmax_denominators,
+            "BH N_k_suffix -> BH N_k_suffix N",
+            N=score_dense_exp.shape[-1],
+        )
+
+        attn_sparse = topk_values_exp / einops.repeat(
+            softmax_denominators, "BH N_q -> BH N_q topk_k", topk_k=topk_k
+        )
+
+        # Create an index tensor for kv_heads * kv_groups
+        i_kv = torch.arange(kv_heads * kv_groups, device=topk_indices.device) // kv_groups  # (H_q,)
+        
+        # Expand dimensions to match broadcasting
+        i_kv = i_kv[:, None, None]  # (H_q, 1, 1)
+        
+        # Gather from prefix_value_states
+        topk_value_states = prefix_value_states[i_kv, topk_indices]  # (H_q, N_q, topk_k, D)
+        
+        # Move to the correct device
+        topk_value_states = topk_value_states.to(attn_sparse.device)
+        xhat = einops.einsum(
+            attn_sparse,
+            topk_value_states,
+            "BH N_q k, BH N_q k D -> BH N_q D",
+        )
+        xhat = xhat + attn_dense @ suffix_value_states
+        xhat = einops.rearrange(xhat, "(b h) n d -> b h n d", b=B, h=H)
+
+        return xhat
+
     @line_profiler.profile
     def forward(
         self,
@@ -260,9 +421,9 @@ class TopkAttention(nn.Module):
         prefix_key_db = repeat_kv_db(
             prefix_key_db, self.original_attn.num_key_value_groups
         )
-        prefix_value_states = repeat_kv(
-            prefix_value_states, self.original_attn.num_key_value_groups
-        )
+        #prefix_value_states = repeat_kv(
+        #    prefix_value_states, self.original_attn.num_key_value_groups
+        #)
         suffix_key_states = repeat_kv(
             suffix_key_states, self.original_attn.num_key_value_groups
         )
@@ -272,7 +433,7 @@ class TopkAttention(nn.Module):
 
         # Note that suffix key/value states are empty tensors that go unused if construct_mode=True
         device = query_states.device
-        attn_output = TopkAttention.topk_attn(
+        attn_output = TopkAttention.topk_attn_no_repeat_no_gather_no_loop(
             topk_k,
             query_states,
             suffix_key_states,

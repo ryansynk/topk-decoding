@@ -4,6 +4,8 @@ import time
 import csv
 import torch
 import datasets
+import sys
+import traceback
 from datetime import datetime
 from transformers import AutoModelForCausalLM, DynamicCache, OffloadedCache, SinkCache, AutoTokenizer
 from topk_decoding import AutoTopkModelForCausalLM, TopkCache
@@ -251,6 +253,7 @@ def main():
             total_time = None
             tokens_per_second = None
             oom = True
+            sys.exit(traceback.format_exc())  # Print and exit
 
     # Write output to file
     write_output(
