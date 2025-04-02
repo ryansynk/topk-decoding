@@ -7,7 +7,13 @@ import datasets
 import sys
 import traceback
 from datetime import datetime
-from transformers import AutoModelForCausalLM, DynamicCache, OffloadedCache, SinkCache, AutoTokenizer
+from transformers import (
+    AutoModelForCausalLM,
+    DynamicCache,
+    OffloadedCache,
+    SinkCache,
+    AutoTokenizer,
+)
 from topk_decoding import AutoTopkModelForCausalLM, TopkCache
 
 
@@ -42,7 +48,12 @@ def get_args():
     )
     parser.add_argument("--k", type=int, default=-1)
     parser.add_argument("--output_dir", type=str, default="outputs")
-    parser.add_argument("--device", type=str, required=True, help="Name of GPU being used. Required for logging purposes")
+    parser.add_argument(
+        "--device",
+        type=str,
+        required=True,
+        help="Name of GPU being used. Required for logging purposes",
+    )
     return parser.parse_args()
 
 
@@ -76,11 +87,13 @@ def get_cache_path(args):
     path = os.path.join(path, "niah_single_1_plot/example_0/kv_cache.pt")
     return path
 
+
 def get_pos_embs_path(args):
     path = os.path.join(args.dataset_dir, args.model.split("/")[-1])
     path = os.path.join(path, str(args.N))
     path = os.path.join(path, "niah_single_1_plot/example_0/pos_embs.pt")
     return path
+
 
 def get_cache_full(cache_tensor, device):
     cache = DynamicCache()
@@ -91,6 +104,7 @@ def get_cache_full(cache_tensor, device):
     cache = cache.to(device)
     return cache
 
+
 def get_cache_offloaded(cache_tensor):
     cache = OffloadedCache()
     for l in range(cache_tensor.shape[1]):
@@ -98,6 +112,7 @@ def get_cache_offloaded(cache_tensor):
         values = cache_tensor[1, l, :, :, :].to("cuda").unsqueeze(0)
         cache.update(keys, values, l)
     return cache
+
 
 def get_cache_streaming_llm(cache_tensor, pos_embs, k):
     if k < 5:
@@ -217,7 +232,7 @@ def main():
     args = get_args()
 
     # Currently only expect args.decode_strategy to be "full" or "topk_flat"
-    #if args.decode_strategy in ["streaming_llm"]:
+    # if args.decode_strategy in ["streaming_llm"]:
     #    raise NotImplementedError
     dataset_path = os.path.join(
         args.dataset_dir, f"dataset_jsons/validation_{args.N}.jsonl"
@@ -256,9 +271,7 @@ def main():
             sys.exit(traceback.format_exc())  # Print and exit
 
     # Write output to file
-    write_output(
-        args, real_N, total_time, tokens_per_second, oom
-    )
+    write_output(args, real_N, total_time, tokens_per_second, oom)
 
 
 if __name__ == "__main__":
