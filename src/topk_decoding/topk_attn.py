@@ -76,59 +76,6 @@ class TopkAttention(nn.Module):
         return faiss_values_tensor, faiss_indices_tensor
 
     @staticmethod
-    def get_topk_via_faiss_no_repeat(
-        topk_k, query_states, key_databases, kv_heads, kv_groups
-    ):
-        """THIS IMPLEMENTATION IS WORSE FOR SOME REASON
-
-        Retrieve top-k values and indices using FAISS.
-
-        Args:
-            topk_k (int): Number of top-k values to retrieve.
-            query_states (torch.Tensor): Query states tensor of shape (BH_q, N_q, D).
-            key_databases (list): List of FAISS search indexes. only num_key_heads of them
-            kv_heads (int): Number of key-value heads.
-            kv_groups (int): Number of key-value groups.
-
-        Returns:
-            torch.Tensor: Top-k normalized score values tensor of shape (BH, N_q, topk_k).
-            torch.Tensor: Top-k indices tensor of shape (BH, N_q, topk_k).
-        """
-        BH, N_q, D = query_states.shape
-        faiss_values_tensor = torch.zeros((BH, N_q, topk_k))
-        faiss_indices_tensor = torch.zeros((BH, N_q, topk_k), dtype=torch.int32)
-        faiss.omp_set_num_threads(32)
-        for i, search_index in enumerate(key_databases):
-            # Group all queries going to same key db together:
-            # (query_states[0]  ... query_states[3]) -> key_databases[0]
-            # (query_states[4]  ... query_states[7]) -> key_databases[1]
-            #                   ...
-            # (query_states[28] ... query_states[31])-> key_databases[7],
-            grouped_queries = query_states[
-                i * kv_groups : (i + 1) * kv_groups, :, :
-            ].reshape(N_q * kv_groups, D)
-            faiss_values, faiss_indices = search_index.search(
-                grouped_queries.contiguous().to(torch.float32).cpu(), k=topk_k
-            )
-            # Un-groups the outputs and stores them in the tensor
-            faiss_values_tensor[i * kv_groups : (i + 1) * kv_groups, :, :] = (
-                torch.tensor(
-                    faiss_values.reshape(kv_groups, N_q, topk_k),
-                    dtype=faiss_values_tensor.dtype,
-                )
-            )
-            faiss_indices_tensor[i * kv_groups : (i + 1) * kv_groups, :, :] = (
-                torch.tensor(
-                    faiss_indices.reshape(kv_groups, N_q, topk_k),
-                    dtype=faiss_indices_tensor.dtype,
-                )
-            )
-
-        # Scale the dot products
-        faiss_values_tensor = faiss_values_tensor / math.sqrt(D)
-        return faiss_values_tensor, faiss_indices_tensor
-
-    @staticmethod
     def topk_attn(
         topk_k,
         query_states,
