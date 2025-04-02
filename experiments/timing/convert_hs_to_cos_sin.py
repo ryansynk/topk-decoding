@@ -23,7 +23,7 @@ def get_args():
         "--N",
         required=True,
         type=str,
-        choices = [str(N) for N in N_values] + ["all"],
+        choices=[str(N) for N in N_values] + ["all"],
         help="Size of context length",
     )
     args = parser.parse_args()
@@ -60,12 +60,14 @@ def get_base_path(args, model_name, N):
 def main():
     args = get_args()
     model = AutoModelForCausalLM.from_pretrained(
-        "gradientai/Llama-3-8B-Instruct-Gradient-1048k", 
-        device_map="auto", 
+        "gradientai/Llama-3-8B-Instruct-Gradient-1048k",
+        device_map="auto",
         torch_dtype=torch.bfloat16,
     )
     for n in args.N:
-        base_path = get_base_path(args, "gradientai/Llama-3-8B-Instruct-Gradient-1048k", n)
+        base_path = get_base_path(
+            args, "gradientai/Llama-3-8B-Instruct-Gradient-1048k", n
+        )
         cache_path = os.path.join(base_path, "kv_cache.pt")
         cache_pos = get_cache_position(cache_path)
         hidden_states_path = os.path.join(base_path, "hs.pt")

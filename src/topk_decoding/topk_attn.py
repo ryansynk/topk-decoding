@@ -140,7 +140,9 @@ class TopkAttention(nn.Module):
             msg = f"Suffix key/value states must not be empty in query/generate mode. Got suffix_key_states: {suffix_key_states.shape if not suffix_key_states is None else type(suffix_key_states)}."
             raise ValueError(msg) from e
 
-        topk_values_exp = torch.exp(topk_values.to(query_states.device))
+        topk_values_exp = torch.exp(
+            topk_values.to(query_states.device).to(query_states.dtype)
+        )
         topk_values_exp_sums = einops.reduce(
             topk_values_exp, "BH N_q topk_k -> BH N_q", "sum"
         )
@@ -162,28 +164,32 @@ class TopkAttention(nn.Module):
             softmax_denominators,
             "BH N_k_suffix -> BH N_k_suffix N",
             N=score_dense_exp.shape[-1],
-        ).to(query_states.dtype)
+        )
 
         attn_sparse = topk_values_exp / einops.repeat(
             softmax_denominators, "BH N_q -> BH N_q topk_k", topk_k=topk_k
         )
 
-        topk_value_states = torch.gather(
-            einops.repeat(
-                prefix_value_states, "BH N_k_prefix D -> BH N_q N_k_prefix D", N_q=N_q
-            ),
-            dim=2,
-            index=einops.repeat(topk_indices, "BH N_q k -> BH N_q k D", D=D).to(
-                torch.int64
-            ),
-        ).to(attn_dense.device)
+        # Create an index tensor for kv_heads * kv_groups
+        i_kv = (
+            torch.arange(kv_heads * kv_groups, device=topk_indices.device) // kv_groups
+        )  # (H_q,)
 
+        # Expand dimensions to match broadcasting
+        i_kv = i_kv[:, None, None]  # (H_q, 1, 1)
+
+        # Gather from prefix_value_states
+        topk_value_states = prefix_value_states[
+            i_kv, topk_indices
+        ]  # (H_q, N_q, topk_k, D)
+
+        # Move to the correct device
+        topk_value_states = topk_value_states.to(attn_sparse.device)
         xhat = einops.einsum(
-            attn_sparse.to(topk_value_states.dtype),
+            attn_sparse,
             topk_value_states,
             "BH N_q k, BH N_q k D -> BH N_q D",
         )
-
         xhat = xhat + attn_dense @ suffix_value_states
         xhat = einops.rearrange(xhat, "(b h) n d -> b h n d", b=B, h=H)
 
@@ -255,9 +261,6 @@ class TopkAttention(nn.Module):
             )
         prefix_key_db = repeat_kv_db(
             prefix_key_db, self.original_attn.num_key_value_groups
-        )
-        prefix_value_states = repeat_kv(
-            prefix_value_states, self.original_attn.num_key_value_groups
         )
         suffix_key_states = repeat_kv(
             suffix_key_states, self.original_attn.num_key_value_groups
