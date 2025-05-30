@@ -6,6 +6,7 @@ import einops
 from torch import nn
 from transformers.cache_utils import Cache
 from typing import List, Optional, Tuple, Union
+import line_profiler
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -43,6 +44,7 @@ class TopkAttention(nn.Module):
         self.original_attn = original_attn
 
     @staticmethod
+    @line_profiler.profile
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
         """Retrieve top-k values and indices using FAISS.
 
@@ -60,9 +62,13 @@ class TopkAttention(nn.Module):
         BH, N_q, D = query_states.shape
         faiss_values_tensor = torch.zeros((BH, N_q, topk_k))
         faiss_indices_tensor = torch.zeros((BH, N_q, topk_k), dtype=torch.int32)
+        query_states = query_states.contiguous().to(torch.float32).cpu()
         for i, search_index in enumerate(key_databases):
+            #faiss_values, faiss_indices = search_index.search(
+            #    query_states[i, :, :].contiguous().to(torch.float32).cpu(), k=topk_k
+            #)
             faiss_values, faiss_indices = search_index.search(
-                query_states[i, :, :].contiguous().to(torch.float32).cpu(), k=topk_k
+                query_states[i], k=topk_k
             )
             faiss_values_tensor[i, :, :] = torch.tensor(
                 faiss_values, dtype=faiss_values_tensor.dtype
@@ -76,6 +82,7 @@ class TopkAttention(nn.Module):
         return faiss_values_tensor, faiss_indices_tensor
 
     @staticmethod
+    @line_profiler.profile
     def topk_attn(
         topk_k,
         query_states,
@@ -195,6 +202,7 @@ class TopkAttention(nn.Module):
 
         return xhat
 
+    @line_profiler.profile
     def forward(
         self,
         hidden_states: torch.Tensor,
