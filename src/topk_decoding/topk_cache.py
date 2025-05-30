@@ -195,6 +195,75 @@ class TopkCache(Cache):
         return key_database
 
     @staticmethod
+    def create_key_database_new(key_states, index_type, BH=None, D=None):
+        """Create a key vector database using FAISS. Stored on CPU.
+
+        Args:
+            key_states (torch.Tensor): Tensor of key states.
+
+        Returns:
+            list: List of FAISS search indexes, one for each batch and head.
+        """
+        assert key_states is not None
+        index_types = ["flat", "ivf", "hnsw"]
+
+        if len(key_states.shape) == 4:
+            B, H, N, D = key_states.shape
+            BH = B * H
+            key_states = einops.rearrange(key_states, "B H N D -> (B H) N D")
+        else:
+            BH, N, D = key_states.shape
+
+        # TODO parallelize?
+        faiss_indices_list = []
+        key_database = []
+        key_states = key_states.cpu().to(torch.float32)
+        for i in range(BH):
+            head_key_states = key_states[i, :, :].contiguous().detach().numpy()
+            if index_type=="flat":
+                search_index = faiss.IndexFlatIP(D)
+                search_index.add(
+                    head_key_states
+                )
+            elif index_type=="ivf":
+                quantizer = faiss.IndexFlatIP(D)
+                if N > 900000:
+                    nlists = int(math.ceil(math.sqrt(N)))
+                else:
+                    nlists = int(math.ceil(N / 1000))
+
+                # TODO have some way of setting this?
+                nprobes = 8
+
+                search_index = faiss.IndexIVFFlat(
+                    quantizer, D, nlists, faiss.METRIC_INNER_PRODUCT
+                )
+                if N < 100000:
+                    search_index.train(
+                        head_key_states
+                    )
+                else:
+                    search_index.train(
+                        head_key_states[:100000, :]
+                    )
+                search_index.add(
+                    head_key_states
+                )
+                search_index.nprobe = nprobes
+            elif index_type=="hnsw":
+                M = 16
+                search_index = faiss.IndexHNSWFlat(D, M, faiss.METRIC_INNER_PRODUCT)
+                search_index.add(
+                    head_key_states
+                )
+            else:
+                raise ValueError("Excpeted index_type to be one of: {}, instead got {index_type}")
+
+            key_database.append(search_index)
+
+        return key_database
+
+    @staticmethod
     def update_key_database(key_states, key_db):
         """Adds key_states to a given faiss key vector database.
 
@@ -221,7 +290,7 @@ class TopkCache(Cache):
         return key_db
 
     @staticmethod
-    def save_cache(cache: "DynamicFaissCache", directory: str) -> None:
+    def save(cache: "DynamicFaissCache", directory: str) -> None:
         cache_path = Path(directory)
         cache_path.mkdir(parents=True, exist_ok=True)
         key_cache_path = cache_path.joinpath("key_cache")
@@ -255,42 +324,7 @@ class TopkCache(Cache):
             layer_idx = layer_idx + 1
 
     @staticmethod
-    def save_cache_tensor(cache: "DynamicFaissCache", filepath: str) -> None:
-        # Check filename is valid
-        if not isinstance(filepath, str):
-            raise ValueError("Filepath must be a string.")
-
-        # Ensure directory exists
-        dir_name = os.path.dirname(filepath)
-        if not os.path.exists(dir_name):
-            raise FileNotFoundError(f"Directory {dir_name} does not exist.")
-
-        v_cache_tensor = []
-        for layer_idx, val_cache_entry in enumerate(cache.value_cache):
-            vals, _ = val_cache_entry  # vals H N D
-            v_cache_tensor.append(vals)
-        v_cache_tensor = torch.stack(v_cache_tensor)  # L H N D
-
-        N, D = v_cache_tensor.shape[-2], v_cache_tensor.shape[-1]
-        dtype = v_cache_tensor.dtype
-        k_cache_tensor = []
-        for layer_idx, key_cache_entry in enumerate(cache.key_cache):
-            key_db, _ = key_cache_entry
-            head_list = []
-            for head_idx, db in enumerate(key_db):
-                head_list.append(
-                    torch.tensor(faiss.rev_swig_ptr(db.get_xb(), N * D))
-                    .reshape((N, D))
-                    .to(dtype)
-                )  # N D
-            k_cache_tensor.append(torch.stack(head_list))  # head_list H N D
-        k_cache_tensor = torch.stack(k_cache_tensor)  # L H N D
-
-        kv_cache_tensor = torch.stack([k_cache_tensor, v_cache_tensor])  # 2 L H N D
-        torch.save(kv_cache_tensor, filepath)
-
-    @staticmethod
-    def load_cache(
+    def load(
         directory: str,
         num_layers: int,
         bh_size: int,
@@ -335,87 +369,13 @@ class TopkCache(Cache):
         cache.seq_lengths = seq_lengths
         return cache
 
-    @staticmethod
-    def load_cache_directory(
-        directory: str = None, flat: bool = True
-    ) -> "DynamicFaissCache":
-        cache = DynamicFaissCache()
-        cache.flat = flat
-        files = os.listdir(directory)
-
-        key_files = sorted(
-            [f for f in files if f.startswith("key_") and f.endswith(".pt")],
-            key=lambda x: int(x.split("_")[1].split(".")[0]),
-        )
-        value_files = sorted(
-            [f for f in files if f.startswith("value_") and f.endswith(".pt")],
-            key=lambda x: int(x.split("_")[1].split(".")[0]),
-        )
-
-        # Load the tensors and append to respective lists
-        l = 0
-        for key_file, value_file in tqdm(zip(key_files, value_files)):
-            key_tensor = torch.load(os.path.join(directory, key_file))
-            dtype = key_tensor.dtype
-            key_db = DynamicFaissCache.create_key_database(
-                flat=flat, key_states=key_tensor
-            )
-            key_cache_tuple = (key_db, torch.empty(0).cuda().to(dtype))
-            cache.key_cache.append(key_cache_tuple)
-
-            value_tensor = torch.load(os.path.join(directory, value_file))
-            val_cache_tuple = (value_tensor, torch.empty(0).cuda().to(dtype))
-            cache.value_cache.append(val_cache_tuple)
-            cache.seq_lengths[l] = key_tensor.shape[-2]
-            cache.sparse_cache_initialized[l] = True
-            l = l + 1
-
-        return cache
-
-    @staticmethod
-    def load_cache_tensor(
-        filepath: str = None,
-        tensor: torch.Tensor = None,
-        flat: bool = True,
-        load_as_directory=False,
-    ) -> "DynamicFaissCache":
-        if not load_as_directory:
-            if filepath is None:
-                kv_cache_tensor = tensor
-            else:
-                kv_cache_tensor = torch.load(filepath)
-
-            assert kv_cache_tensor is not None
-            cache = DynamicFaissCache()
-            cache.flat = flat
-
-            num_layers = kv_cache_tensor.shape[1]
-            dtype = kv_cache_tensor.dtype
-            for l in range(num_layers):
-                key_db = DynamicFaissCache.create_key_database(
-                    flat=flat, key_states=kv_cache_tensor[0, l, :, :, :]
-                )
-                key_cache_tuple = (key_db, torch.empty(0).cuda().to(dtype))
-                cache.key_cache.append(key_cache_tuple)
-
-                val_cache_tuple = (
-                    kv_cache_tensor[1, l, :, :, :],
-                    torch.empty(0).cuda().to(dtype),
-                )
-                cache.value_cache.append(val_cache_tuple)
-                cache.seq_lengths[l] = kv_cache_tensor.shape[-2]
-                cache.sparse_cache_initialized[l] = True
-        else:
-            cache = DynamicFaissCache.load_cache_directory(filepath, flat)
-
-        return cache
-
     @classmethod
-    def from_dynamic_cache(cls, dynamic_cache: DynamicCache, use_ivf: bool = False):
+    def from_dynamic_cache(cls, dynamic_cache: DynamicCache, use_ivf: bool = False, index_type: str = "flat"):
         cache = cls()
         key_cache = []
         for k in dynamic_cache.key_cache:
-            key_db = cls.create_key_database(k, flat=(not use_ivf))
+            #key_db = cls.create_key_database(k, flat=(not use_ivf))
+            key_db = cls.create_key_database_new(k, index_type=index_type)
             key_cache.append((key_db, torch.empty(0).cuda().to(k.dtype)))
         cache.key_cache = key_cache
 

@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument(
         "--decode_strategy",
         type=str,
-        choices=["full", "offloaded", "topk_flat", "topk_ivf", "streaming_llm"],
+        choices=["full", "offloaded", "topk_flat", "topk_ivf", "topk_hnsw", "streaming_llm"],
         required=True,
     )
     parser.add_argument(
@@ -75,7 +75,7 @@ def get_kwargs(args, cache):
             temperature=None,
             top_p=None,
         )
-    if args.decode_strategy in ["topk_flat", "topk_ivf"]:
+    if args.decode_strategy in ["topk_flat", "topk_ivf", "topk_hnsw"]:
         kwargs["k"] = args.k
     kwargs["past_key_values"] = cache
     return kwargs
@@ -141,8 +141,21 @@ def get_cache(path, args):
         cache = get_cache_full(cache_tensor, "cpu")
         cache = TopkCache.from_dynamic_cache(cache)
     elif args.decode_strategy == "topk_ivf":
-        cache = get_cache_full(cache_tensor, "cpu")
-        cache = TopkCache.from_dynamic_cache(cache, use_ivf=True)
+        ivf_path = os.path.join(os.path.split(path)[0], "ivf_cache")
+        if os.path.isdir(ivf_path):
+            cache = TopkCache.load(ivf_path)
+        else:
+            cache = get_cache_full(cache_tensor, "cpu")
+            cache = TopkCache.from_dynamic_cache(cache, use_ivf=True)
+            TopkCache.save(cache, ivf_path)
+    elif args.decode_strategy == "topk_hnsw":
+        hnsw_path = os.path.join(os.path.split(path)[0], "hnsw_cache")
+        if os.path.isdir(hnsw_path):
+            cache = TopkCache.load(hnsw_path)
+        else:
+            cache = get_cache_full(cache_tensor, "cpu")
+            cache = TopkCache.from_dynamic_cache(cache, index_type="hnsw")
+            TopkCache.save(cache, hnsw_path)
     elif args.decode_strategy == "offloaded":
         cache = get_cache_offloaded(cache_tensor)
     elif args.decode_strategy == "streaming_llm":
@@ -156,7 +169,7 @@ def get_cache(path, args):
 
 
 def get_model(args):
-    if args.decode_strategy in ["topk_flat", "topk_ivf"]:
+    if args.decode_strategy in ["topk_flat", "topk_ivf", "topk_hnsw"]:
         model = AutoTopkModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype=torch.bfloat16,
