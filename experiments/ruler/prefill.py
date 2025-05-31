@@ -1,6 +1,7 @@
 import argparse
 import os
 import functools
+import gc
 import datasets
 import torch
 from tqdm import tqdm
@@ -39,6 +40,12 @@ def get_args():
         type=int,
         default=-1,
         help="Select a subset of total examples (100 max)",
+    )
+    parser.add_argument(
+        "--start_idx",
+        type=int,
+        default=0,
+        help="Index of dataset to start on"
     )
     return parser.parse_args()
 
@@ -82,7 +89,9 @@ def main():
     os.makedirs(cache_path, exist_ok=True)
     dataset = datasets.load_dataset("json", data_files={"eval": dataset_path})["eval"]
     if args.num_examples > 0:
-        dataset = dataset.select(range(args.num_examples))
+        dataset = dataset.select(range(args.start_idx, args.start_idx + args.num_examples))
+    else:
+        dataset = dataset.select(range(args.start_idx, 100))
     dataset = dataset.map(functools.partial(get_context_query, task=args.task))
 
     if args.unroll:
@@ -130,6 +139,8 @@ def main():
             torch.save(cache_tensor, example_path)
             ex.update({"context_cache_path": example_path})
             dataset_w_caches.append(ex)
+            torch.cuda.empty_cache()
+            gc.collect()
 
     dataset_w_caches = datasets.Dataset.from_list(dataset_w_caches)
     dataset_w_caches.to_json(output_path, orient="records")

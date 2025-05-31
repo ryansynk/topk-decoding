@@ -64,7 +64,7 @@ def get_args():
         help="Turn on sampling during generation (output will be deterministic).",
     )
     parser.add_argument("--max_new_tokens", default=5, type=int)
-    parser.add_argument("--k", type=int, default=128)
+    parser.add_argument("--k", type=int, default=None)
     parser.add_argument(
         "--device",
         type=str,
@@ -101,39 +101,6 @@ def get_kwargs(args, cache, tokenizer):
         kwargs["k"] = args.k
     kwargs["past_key_values"] = cache
     return kwargs
-
-
-def get_suffix_index(tokenizer, text, query_delimiter="[/INST]"):
-    # Return the index of the first token after the string "[/INST]" in the prompt. This is used to split the prompt into prefix and suffix for topk attention.
-    # get the sequence of ids that makes up an instruction ending token. Tokenizers always start with a beginning token so strip that off.
-    inst_token_ids = tokenizer(
-        [query_delimiter], return_tensors="pt", padding=False
-    ).input_ids[0, 1:]
-    prompt_token_ids = tokenizer(text, return_tensors="pt", padding=True).input_ids[0]
-    prompt_length = len(prompt_token_ids)
-    inst_token_length = len(inst_token_ids)
-    for i in range(prompt_length - inst_token_length + 1):
-        if torch.equal(prompt_token_ids[i : i + inst_token_length], inst_token_ids):
-            return i + inst_token_length
-    return -1
-
-
-def get_suffix_indices(example, tokenizer):
-    query_delimiter = "[/INST]"
-    text = example["input"]
-    suffix_text_idx = text.rfind(query_delimiter) + len(query_delimiter)
-    suffix_token_idx = get_suffix_index(tokenizer, text, query_delimiter)
-    assert (
-        suffix_text_idx != -1 and suffix_token_idx != 1
-    ), "Instruction token not found in prompt"
-    # kv_cache_prefix = kv_cache[:, :, :, :suffix_token_idx, :]
-    example.update(
-        {
-            "suffix_token_idx": suffix_token_idx,
-            "suffix_text": text[suffix_text_idx:],
-        }
-    )
-    return example
 
 
 def get_pos_embs_path(args):
@@ -179,6 +146,28 @@ def get_cache_streaming_llm(cache_tensor, pos_embs, k):
     return cache
 
 
+def prefill_streaming_llm_cache(model, tokenizer, cache, context):
+    print("ABout to prefill")
+    with torch.no_grad():
+        context_inputs = tokenizer(context, return_tensors="pt").to(model.device)
+        length = context_inputs.input_ids.shape[-1]
+        chunk_size = 124
+        #num_chunks = 4
+        #assert length % num_chunks == 0
+        #chunk_size = int(length / num_chunks)
+        tokens_processed = 0 
+        i = 0
+        while tokens_processed < length:
+            ids = context_inputs.input_ids[:, i*chunk_size:(i+1)*chunk_size]
+            cache = model(ids, past_key_values=cache).past_key_values
+            tokens_processed = cache.get_seq_length()
+            print(tokens_processed)
+            print(cache.key_cache[0].shape)
+            i = i + 1
+    print("Finished prefill")
+    return cache
+
+
 def get_cache(path, args, model):
     cache_tensor = torch.load(path)
     real_N = cache_tensor.shape[-2]
@@ -186,33 +175,29 @@ def get_cache(path, args, model):
     if args.decode_strategy == "full":
         cache = get_cache_full(cache_tensor, "cuda")
     elif args.decode_strategy == "topk_flat":
+        assert args.k > 0, "Chose top-k but k not set!"
         cache = get_cache_full(cache_tensor, "cpu")
         cache = TopkCache.from_dynamic_cache(cache)
     elif args.decode_strategy == "topk_ivf":
-        ivf_path = os.path.join(os.path.split(path)[0], "ivf_cache")
-        if os.path.isdir(ivf_path):
-           config = model.config
-           cache = TopkCache.load(ivf_path, config.num_hidden_layers, config.num_key_value_heads)
-        else:
-           cache = get_cache_full(cache_tensor, "cpu")
-           cache = TopkCache.from_dynamic_cache(cache, use_ivf=True)
-           TopkCache.save(cache, ivf_path)
+        assert args.k > 0, "Chose top-k but k not set!"
         cache = get_cache_full(cache_tensor, "cpu")
         cache = TopkCache.from_dynamic_cache(cache, use_ivf=True)
     elif args.decode_strategy == "topk_hnsw":
-        hnsw_path = os.path.join(os.path.split(path)[0], "hnsw_cache")
-        if os.path.isdir(hnsw_path):
-            cache = TopkCache.load(hnsw_path)
-        else:
-            cache = get_cache_full(cache_tensor, "cpu")
-            cache = TopkCache.from_dynamic_cache(cache, index_type="hnsw")
-            TopkCache.save(cache, hnsw_path)
+        assert args.k > 0, "Chose top-k but k not set!"
+        cache = get_cache_full(cache_tensor, "cpu")
+        cache = TopkCache.from_dynamic_cache(cache, index_type="hnsw")
     elif args.decode_strategy == "offloaded":
         cache = get_cache_offloaded(cache_tensor)
     elif args.decode_strategy == "streaming_llm":
-        pos_embs_path = get_pos_embs_path(args)
-        pos_embs = torch.load(pos_embs_path)
-        cache = get_cache_streaming_llm(cache_tensor, pos_embs, args.k)
+        # pos_embs_path = get_pos_embs_path(args)
+        # pos_embs = torch.load(pos_embs_path)
+        # cache = get_cache_streaming_llm(cache_tensor, pos_embs, args.k)
+        if args.k < 5:
+            num_sink_tokens = 1
+        else:
+            num_sink_tokens = 4
+        window_length = args.k - num_sink_tokens
+        cache = SinkCache(window_length=window_length, num_sink_tokens=num_sink_tokens)
     else:
         raise NotImplementedError
 
@@ -233,13 +218,6 @@ def get_model(args):
     return model
 
 
-# def get_query_tokens(dataset, tokenizer, device):
-#    # Hard-coded to select 1st example
-#    query_str = dataset[0]["input"] + dataset[0]["suffix"]
-#    query_tokens = tokenizer(query_str, return_tensors="pt").to(device)
-#    return query_tokens
-
-
 def time_generate(model, inputs, kwargs):
     model = model.eval()
     with torch.no_grad():
@@ -251,17 +229,14 @@ def time_generate(model, inputs, kwargs):
         elapsed_time = time.time() - start_time
     return elapsed_time, outputs
 
+
 def write_output(args, output_dataset):
     model_name_suffix = args.model.split("/")[-1]
     output_path = os.path.join(
-        args.output_dir,
-        f"{args.task}/{model_name_suffix}/N_{args.N}/{args.task}"
+        args.output_dir, f"{args.task}/{model_name_suffix}/N_{args.N}/{args.task}"
     )
     os.makedirs(output_path, exist_ok=True)
-    output_path = os.path.join(
-        output_path,
-        f"answers_{args.decode_strategy}.csv"
-    )
+    output_path = os.path.join(output_path, f"answers_{args.decode_strategy}.csv")
     df = pl.from_dicts(output_dataset)
     df.write_csv(output_path)
 
@@ -277,7 +252,9 @@ def get_output_str(outputs, tokenizer, task):
     else:
         query_delimiter = "[/INST]"
 
-    query_delimiter_idx = decoded_output[0].rfind(query_delimiter) + len(query_delimiter)
+    query_delimiter_idx = decoded_output[0].rfind(query_delimiter) + len(
+        query_delimiter
+    )
     answer_str = decoded_output[0][query_delimiter_idx:]
     match = re.search(r"\b\d+\b", answer_str)
     if match:
@@ -285,6 +262,7 @@ def get_output_str(outputs, tokenizer, task):
     else:
         output_str = [""]
     return output_str
+
 
 def get_dataset_path(args):
     path = os.path.join(args.dataset_dir, f"N_{args.N}")
@@ -294,6 +272,7 @@ def get_dataset_path(args):
     os.makedirs(path, exist_ok=True)
     path = os.path.join(path, "validation_w_cache.jsonl")
     return os.path.abspath(path)
+
 
 def main():
     # Times generation of one token given a pre-built KV cache
@@ -312,22 +291,25 @@ def main():
     output_dataset = []
     for ex in tqdm(dataset):
         try:
-            cache, real_N = get_cache(
-                ex["context_cache_path"], args, model.model
-            )
+            cache, real_N = get_cache(ex["context_cache_path"], args, model.model)
         except torch.cuda.OutOfMemoryError as e:
-            print(f"Failed to move cache to GPU (OOM): {e}")
             cache = None
             real_N = -1
             total_time = None
             tokens_per_second = None
             oom = True
-            predicted_output = None
+            predicted_output = [""] 
             correct = False
 
         if cache is not None:
             try:
-                inputs = tokenizer(ex['context'] + ex['query'], return_tensors="pt").to(model.device)
+                inputs = tokenizer(ex["context"] + ex["query"], return_tensors="pt").to(
+                    model.device
+                )
+                if args.decode_strategy == "streaming_llm":
+                    cache = prefill_streaming_llm_cache(
+                        model, tokenizer, cache, ex["context"]
+                    )
                 kwargs = get_kwargs(args, cache, tokenizer)
                 total_time, outputs = time_generate(model, inputs, kwargs)
                 predicted_output = get_output_str(outputs, tokenizer, args.task)
@@ -338,7 +320,7 @@ def main():
                 total_time = None
                 tokens_per_second = None
                 correct = False
-                predicted_output = None
+                predicted_output = [""] 
                 oom = True
             except RuntimeError as e:
                 print(f"Generation failed: {e}")
@@ -346,7 +328,7 @@ def main():
                 tokens_per_second = None
                 oom = True
                 correct = False
-                predicted_output = None
+                predicted_output = [""] 
                 sys.exit(traceback.format_exc())  # Print and exit
 
         ex.update(
@@ -357,7 +339,9 @@ def main():
                 "predicted_output": predicted_output[0],
                 "correct": correct,
                 "outputs": ex["outputs"][0],
-                "peak_gpu_memory": torch.cuda.max_memory_allocated()
+                "peak_gpu_memory": torch.cuda.max_memory_allocated(),
+                "k": args.k,
+                "decode_strategy": args.decode_strategy
             }
         )
         output_dataset.append(ex)
