@@ -72,7 +72,7 @@ def get_args():
         help="Name of GPU being used. Required for logging purposes",
     )
     parser.add_argument(
-        "--debug", action="store_true", help="Runs in debug mode with 2 examples"
+        "--num_examples", type=int, default=None
     )
     return parser.parse_args()
 
@@ -282,8 +282,8 @@ def main():
     dataset_path = get_dataset_path(args)
     dataset = datasets.load_dataset("json", data_files=dataset_path)["train"]
 
-    if args.debug:
-        dataset = dataset.select(range(2))
+    if args.num_examples is not None:
+        dataset = dataset.select(range(args.num_examples))
 
     model = get_model(args)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
