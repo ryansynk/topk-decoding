@@ -236,7 +236,11 @@ def write_output(args, output_dataset):
         args.output_dir, f"{args.task}/{model_name_suffix}/N_{args.N}/{args.task}"
     )
     os.makedirs(output_path, exist_ok=True)
-    output_path = os.path.join(output_path, f"answers_{args.decode_strategy}.csv")
+    if args.num_examples is not None:
+        fname = f"answers_{args.decode_strategy}_nex_{args.num_examples}.csv"
+    else:
+        fname = f"answers_{args.decode_strategy}.csv"
+    output_path = os.path.join(output_path, fname)
     df = pl.from_dicts(output_dataset)
     df.write_csv(output_path)
 
@@ -314,7 +318,8 @@ def main():
                 total_time, outputs = time_generate(model, inputs, kwargs)
                 predicted_output = get_output_str(outputs, tokenizer, args.task)
                 correct = predicted_output == ex["outputs"]
-                tokens_per_second = kwargs["max_new_tokens"] / total_time
+                num_tokens = outputs.shape[-1] - inputs.input_ids.shape[-1]
+                tokens_per_second = num_tokens / total_time
             except torch.cuda.OutOfMemoryError as e:
                 print(f"Generation failed, out of memory: {e}")
                 total_time = None
@@ -322,6 +327,7 @@ def main():
                 correct = False
                 predicted_output = [""] 
                 oom = True
+                num_tokens = None
             except RuntimeError as e:
                 print(f"Generation failed: {e}")
                 total_time = None
@@ -329,6 +335,7 @@ def main():
                 oom = True
                 correct = False
                 predicted_output = [""] 
+                num_tokens = None
                 sys.exit(traceback.format_exc())  # Print and exit
 
         ex.update(
@@ -341,7 +348,8 @@ def main():
                 "outputs": ex["outputs"][0],
                 "peak_gpu_memory": torch.cuda.max_memory_allocated(),
                 "k": args.k,
-                "decode_strategy": args.decode_strategy
+                "decode_strategy": args.decode_strategy,
+                "num_tokens": num_tokens,
             }
         )
         output_dataset.append(ex)
