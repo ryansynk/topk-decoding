@@ -1,4 +1,5 @@
 import math
+import os
 import faiss
 import torch
 import torch.nn.functional as F
@@ -6,7 +7,7 @@ import einops
 from torch import nn
 from transformers.cache_utils import Cache
 from typing import List, Optional, Tuple, Union
-import line_profiler
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
@@ -44,7 +45,122 @@ class TopkAttention(nn.Module):
         self.original_attn = original_attn
 
     @staticmethod
-    @line_profiler.profile
+    def _perform_faiss_search_task(args):
+        """
+        Helper function to perform a single FAISS search operation.
+        This function is designed to be executed by a concurrent executor (e.g., ThreadPoolExecutor).
+
+        Args:
+            args (tuple): A tuple containing:
+                - idx (int): The original index of the search_index and query_state slice,
+                             used to place results back into the correct position.
+                - search_index (faiss.Index): The FAISS index instance to search against.
+                - query_state_slice (torch.Tensor): A slice of the query states tensor
+                                                     relevant to this specific FAISS index.
+                - topk_k (int): The number of top-k nearest neighbors to retrieve.
+
+        Returns:
+            tuple: A tuple containing:
+                - idx (int): The original index passed in.
+                - faiss_values (numpy.ndarray): The raw distance/similarity values returned by FAISS.
+                - faiss_indices (numpy.ndarray): The raw indices of the nearest neighbors returned by FAISS.
+        """
+        idx, search_index, query_state_slice, topk_k = args
+
+        # Ensure the query state is a contiguous float32 NumPy array on CPU.
+        # FAISS operates on NumPy arrays, so conversion from PyTorch tensor is necessary.
+        query_np = query_state_slice.contiguous().to(torch.float32).cpu().numpy()
+
+        #params = faiss.SearchParametersHNSW(efsearch=topk_k * 2)
+
+        # Perform the FAISS search.
+        # faiss_values will contain distances (or inner products), faiss_indices will contain the indices.
+        #faiss_values, faiss_indices = search_index.search(query_np, k=topk_k, params=params)
+        faiss_values, faiss_indices = search_index.search(query_np, k=topk_k)
+
+        return idx, faiss_values, faiss_indices
+
+    @staticmethod
+    def threaded_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
+        """
+        Retrieve top-k values and indices using FAISS, parallelizing the search
+        across multiple independent FAISS indexes.
+
+        This function improves performance by running multiple `search_index.search`
+        operations concurrently using a ThreadPoolExecutor.
+
+        Args:
+            topk_k (int): Number of top-k values to retrieve.
+            query_states (torch.Tensor): Query states tensor of shape (BH, N_q, D).
+                                         BH is Batch * Head, N_q is number of queries, D is dimension.
+            key_databases (list): A list of FAISS search index objects. Each index
+                                  will be searched in parallel.
+            kv_heads (int): Number of key-value heads (passed through, not used in this function's logic).
+            kv_groups (int): Number of key-value groups (passed through, not used in this function's logic).
+
+        Returns:
+            torch.Tensor: Top-k normalized score values tensor of shape (BH, N_q, topk_k).
+            torch.Tensor: Top-k indices tensor of shape (BH, N_q, topk_k).
+        """
+        BH, N_q, D = query_states.shape
+
+        # Initialize PyTorch tensors to store the aggregated results.
+        # These tensors are pre-allocated to be filled by the parallel tasks.
+        faiss_values_tensor = torch.zeros((BH, N_q, topk_k), dtype=torch.float32)
+        # Using torch.int32 for indices as per the original code's dtype.
+        faiss_indices_tensor = torch.zeros((BH, N_q, topk_k), dtype=torch.int32)
+
+        # Prepare a list of tasks for the executor.
+        # Each task is a tuple containing the necessary arguments for _perform_faiss_search_task.
+        tasks = []
+        for i, search_index in enumerate(key_databases):
+            # Extract the relevant slice of query_states for the current FAISS index.
+            # It's crucial to move the tensor to CPU before passing to FAISS, as FAISS
+            # typically operates on CPU-resident NumPy arrays.
+            query_slice = query_states[i, :, :]
+            tasks.append((i, search_index, query_slice, topk_k))
+
+        # Determine the number of worker threads.
+        # It's generally good practice to use the number of available CPU cores,
+        # but not more workers than there are tasks.
+        num_workers = min(len(key_databases), os.cpu_count() if os.cpu_count() else 1)
+
+        # Use ThreadPoolExecutor for parallel execution.
+        # ThreadPoolExecutor is suitable here because FAISS operations (written in C++)
+        # typically release Python's Global Interpreter Lock (GIL), allowing multiple
+        # searches to run in parallel even within a single Python process.
+        # If FAISS were purely Python-bound or didn't release the GIL, ProcessPoolExecutor
+        # would be necessary, but it has higher overhead due to inter-process communication.
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            # Submit each task to the executor and store the future object along with its original index.
+            future_to_index = {executor.submit(TopkAttention._perform_faiss_search_task, task): task[0] for task in tasks}
+
+            # Iterate over completed futures as they finish.
+            # as_completed yields futures as soon as their results are ready,
+            # which allows for efficient collection of results.
+            for future in as_completed(future_to_index):
+                idx = future_to_index[future] # Retrieve the original index for this completed task
+                try:
+                    # Get the result from the completed future.
+                    # The result is (original_index, faiss_values_numpy_array, faiss_indices_numpy_array).
+                    _, values_np, indices_np = future.result()
+
+                    # Convert the NumPy arrays returned by FAISS back into PyTorch tensors
+                    # and place them into the pre-allocated result tensors at the correct index.
+                    faiss_values_tensor[idx, :, :] = torch.from_numpy(values_np).to(faiss_values_tensor.dtype)
+                    faiss_indices_tensor[idx, :, :] = torch.from_numpy(indices_np).to(faiss_indices_tensor.dtype)
+                except Exception as exc:
+                    # Basic error handling: print an error message if a search fails.
+                    # In a production environment, you might want more sophisticated error logging
+                    # or a strategy for handling failed searches (e.g., returning default values).
+                    print(f'FAISS search for index {idx} generated an exception: {exc}')
+
+        faiss_values_tensor = faiss_values_tensor / math.sqrt(D)
+
+        return faiss_values_tensor, faiss_indices_tensor
+
+
+    @staticmethod
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
         """Retrieve top-k values and indices using FAISS.
 
@@ -82,7 +198,6 @@ class TopkAttention(nn.Module):
         return faiss_values_tensor, faiss_indices_tensor
 
     @staticmethod
-    @line_profiler.profile
     def topk_attn(
         topk_k,
         query_states,
@@ -202,7 +317,6 @@ class TopkAttention(nn.Module):
 
         return xhat
 
-    @line_profiler.profile
     def forward(
         self,
         hidden_states: torch.Tensor,
