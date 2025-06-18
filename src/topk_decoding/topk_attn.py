@@ -81,7 +81,7 @@ class TopkAttention(nn.Module):
         return idx, faiss_values, faiss_indices
 
     @staticmethod
-    def threaded_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
+    def threaded_get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
         """
         Retrieve top-k values and indices using FAISS, parallelizing the search
         across multiple independent FAISS indexes.
