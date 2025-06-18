@@ -181,7 +181,7 @@ def get_cache(path, args, model):
     elif args.decode_strategy == "topk_ivf":
         assert args.k > 0, "Chose top-k but k not set!"
         cache = get_cache_full(cache_tensor, "cpu")
-        cache = TopkCache.from_dynamic_cache(cache, use_ivf=True)
+        cache = TopkCache.from_dynamic_cache(cache, index_type="ivf")
     elif args.decode_strategy == "topk_hnsw":
         assert args.k > 0, "Chose top-k but k not set!"
         cache = get_cache_full(cache_tensor, "cpu")
