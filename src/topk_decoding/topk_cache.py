@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, DefaultDict, List, Optional, Tuple
 from collections import defaultdict
 from pathlib import Path
-
 import math
 import os
 import torch
@@ -38,11 +37,7 @@ class TopkCache(Cache):
     def __init__(self, flat: bool = True) -> None:
         self.key_cache: List[(faiss.swigfaiss_avx2.IndexFlatIP, torch.Tensor)] = []
         self.value_cache: List[(torch.Tensor, torch.Tensor)] = []
-        self.dense_key_cache: List[torch.Tensor] = []
-        self.dense_value_cache: List[torch.Tensor] = []
         self.seq_lengths: DefaultDict[int, int] = defaultdict(int)
-        self.sparse_cache_initialized: DefaultDict[int, bool] = defaultdict(bool)
-        self.flat = flat
         super().__init__()
 
     def __len__(self) -> int:
@@ -96,33 +91,6 @@ class TopkCache(Cache):
 
     def to_legacy_cache(self):
         return self
-
-    def update_dense_to_sparse(self):
-        for layer_idx, key_cache_entry in enumerate(self.key_cache):
-            sparse_prefix_keys, _ = key_cache_entry
-            dense_keys = self.dense_key_cache[layer_idx]
-            prefix_key_cache_update = torch.cat(
-                (sparse_prefix_keys, dense_keys.cpu()), dim=-2
-            )
-            self.key_cache[layer_idx] = (
-                prefix_key_cache_update,
-                torch.empty(0).cuda().to(dense_keys.dtype),
-            )
-
-        for layer_idx, value_cache_entry in enumerate(self.value_cache):
-            sparse_prefix_values, _ = value_cache_entry
-            dense_values = self.dense_value_cache[layer_idx]
-            prefix_value_cache_update = torch.cat(
-                (sparse_prefix_values, dense_values.cpu()), dim=-2
-            )
-            self.value_cache[layer_idx] = (
-                prefix_value_cache_update,
-                torch.empty(0).cuda().to(dense_values.dtype),
-            )
-
-        self.dense_key_cache = []
-        self.dense_value_cache = []
-
 
     @staticmethod
     def create_key_database(key_states, index_type, BH=None, D=None):
@@ -196,33 +164,7 @@ class TopkCache(Cache):
         return key_database
 
     @staticmethod
-    def update_key_database(key_states, key_db):
-        """Adds key_states to a given faiss key vector database.
-
-        Args:
-            key_states (torch.Tensor): Tensor of key states.
-            key_db (faiss index): Current key database
-
-        Returns:
-            list: List of FAISS search indexes, one for each batch and head.
-        """
-        if len(key_states.shape) == 4:
-            B, H, N, D = key_states.shape
-            BH = B * H
-            key_states = einops.rearrange(key_states, "B H N D -> (B H) N D")
-        else:
-            BH, N, D = key_states.shape
-
-        # TODO parallelize?
-        faiss_indices_list = []
-        key_database = []
-        for i, db in enumerate(key_db):
-            db.add(key_states[i, :, :].contiguous().to(torch.float32).cpu())
-
-        return key_db
-
-    @staticmethod
-    def save(cache: "DynamicFaissCache", directory: str) -> None:
+    def save(cache: "TopkCache", directory: str) -> None:
         cache_path = Path(directory)
         cache_path.mkdir(parents=True, exist_ok=True)
         key_cache_path = cache_path.joinpath("key_cache")
@@ -262,7 +204,7 @@ class TopkCache(Cache):
         bh_size: int,
         device="cuda",
         dtype=torch.bfloat16,
-    ) -> "DynamicFaissCache":
+    ) -> "TopkCache":
         cache_path = Path(directory)
         key_cache_path = cache_path.joinpath("key_cache")
         value_cache_path = cache_path.joinpath("value_cache")
