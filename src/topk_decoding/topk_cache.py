@@ -118,12 +118,10 @@ class TopkCache(Cache):
         key_states = key_states.cpu().to(torch.float32)
         for i in range(BH):
             head_key_states = key_states[i, :, :].contiguous().detach().numpy()
-            if index_type=="flat":
+            if index_type == "flat":
                 search_index = faiss.IndexFlatIP(D)
-                search_index.add(
-                    head_key_states
-                )
-            elif index_type=="ivf":
+                search_index.add(head_key_states)
+            elif index_type == "ivf":
                 quantizer = faiss.IndexFlatIP(D)
                 if N > 900000:
                     nlists = int(math.ceil(math.sqrt(N)))
@@ -137,23 +135,15 @@ class TopkCache(Cache):
                     quantizer, D, nlists, faiss.METRIC_INNER_PRODUCT
                 )
                 if N < 100000:
-                    search_index.train(
-                        head_key_states
-                    )
+                    search_index.train(head_key_states)
                 else:
-                    search_index.train(
-                        head_key_states[:100000, :]
-                    )
-                search_index.add(
-                    head_key_states
-                )
+                    search_index.train(head_key_states[:100000, :])
+                search_index.add(head_key_states)
                 search_index.nprobe = nprobes
-            elif index_type=="hnsw":
+            elif index_type == "hnsw":
                 M = 16
                 search_index = faiss.IndexHNSWFlat(D, M, faiss.METRIC_INNER_PRODUCT)
-                search_index.add(
-                    head_key_states
-                )
+                search_index.add(head_key_states)
             else:
                 raise ValueError(
                     "Expected index_type to be one of: {}, instead got {index_type}"

@@ -71,17 +71,19 @@ class TopkAttention(nn.Module):
         # FAISS operates on NumPy arrays, so conversion from PyTorch tensor is necessary.
         query_np = query_state_slice.contiguous().to(torch.float32).cpu().numpy()
 
-        #params = faiss.SearchParametersHNSW(efsearch=topk_k * 2)
+        # params = faiss.SearchParametersHNSW(efsearch=topk_k * 2)
 
         # Perform the FAISS search.
         # faiss_values will contain distances (or inner products), faiss_indices will contain the indices.
-        #faiss_values, faiss_indices = search_index.search(query_np, k=topk_k, params=params)
+        # faiss_values, faiss_indices = search_index.search(query_np, k=topk_k, params=params)
         faiss_values, faiss_indices = search_index.search(query_np, k=topk_k)
 
         return idx, faiss_values, faiss_indices
 
     @staticmethod
-    def threaded_get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
+    def threaded_get_topk_via_faiss(
+        topk_k, query_states, key_databases, kv_heads, kv_groups
+    ):
         """
         Retrieve top-k values and indices using FAISS, parallelizing the search
         across multiple independent FAISS indexes.
@@ -133,13 +135,18 @@ class TopkAttention(nn.Module):
         # would be necessary, but it has higher overhead due to inter-process communication.
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             # Submit each task to the executor and store the future object along with its original index.
-            future_to_index = {executor.submit(TopkAttention._perform_faiss_search_task, task): task[0] for task in tasks}
+            future_to_index = {
+                executor.submit(TopkAttention._perform_faiss_search_task, task): task[0]
+                for task in tasks
+            }
 
             # Iterate over completed futures as they finish.
             # as_completed yields futures as soon as their results are ready,
             # which allows for efficient collection of results.
             for future in as_completed(future_to_index):
-                idx = future_to_index[future] # Retrieve the original index for this completed task
+                idx = future_to_index[
+                    future
+                ]  # Retrieve the original index for this completed task
                 try:
                     # Get the result from the completed future.
                     # The result is (original_index, faiss_values_numpy_array, faiss_indices_numpy_array).
@@ -147,18 +154,21 @@ class TopkAttention(nn.Module):
 
                     # Convert the NumPy arrays returned by FAISS back into PyTorch tensors
                     # and place them into the pre-allocated result tensors at the correct index.
-                    faiss_values_tensor[idx, :, :] = torch.from_numpy(values_np).to(faiss_values_tensor.dtype)
-                    faiss_indices_tensor[idx, :, :] = torch.from_numpy(indices_np).to(faiss_indices_tensor.dtype)
+                    faiss_values_tensor[idx, :, :] = torch.from_numpy(values_np).to(
+                        faiss_values_tensor.dtype
+                    )
+                    faiss_indices_tensor[idx, :, :] = torch.from_numpy(indices_np).to(
+                        faiss_indices_tensor.dtype
+                    )
                 except Exception as exc:
                     # Basic error handling: print an error message if a search fails.
                     # In a production environment, you might want more sophisticated error logging
                     # or a strategy for handling failed searches (e.g., returning default values).
-                    print(f'FAISS search for index {idx} generated an exception: {exc}')
+                    print(f"FAISS search for index {idx} generated an exception: {exc}")
 
         faiss_values_tensor = faiss_values_tensor / math.sqrt(D)
 
         return faiss_values_tensor, faiss_indices_tensor
-
 
     @staticmethod
     def get_topk_via_faiss(topk_k, query_states, key_databases, kv_heads, kv_groups):
@@ -180,12 +190,10 @@ class TopkAttention(nn.Module):
         faiss_indices_tensor = torch.zeros((BH, N_q, topk_k), dtype=torch.int32)
         query_states = query_states.contiguous().to(torch.float32).cpu()
         for i, search_index in enumerate(key_databases):
-            #faiss_values, faiss_indices = search_index.search(
+            # faiss_values, faiss_indices = search_index.search(
             #    query_states[i, :, :].contiguous().to(torch.float32).cpu(), k=topk_k
-            #)
-            faiss_values, faiss_indices = search_index.search(
-                query_states[i], k=topk_k
-            )
+            # )
+            faiss_values, faiss_indices = search_index.search(query_states[i], k=topk_k)
             faiss_values_tensor[i, :, :] = torch.tensor(
                 faiss_values, dtype=faiss_values_tensor.dtype
             )
