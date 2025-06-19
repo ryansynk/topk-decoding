@@ -38,7 +38,7 @@ import yaml
 from pathlib import Path
 from tqdm import tqdm
 from collections import defaultdict
-from nemo.collections.asr.parts.utils.manifest_utils import read_manifest, write_manifest
+from utils import load_data, dump_jsonl
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--data_dir", type=str, required=True, help='path to the prediction jsonl files')
@@ -66,7 +66,7 @@ def get_pred_and_ref(
     prediction_field: str = 'pred',
     metadata_field: str = 'others',
 ):
-    lines = read_manifest(predictions_file)
+    lines = load_data(predictions_file)
 
     inputs = []
     predicts = []
@@ -161,9 +161,9 @@ def aggregate_chunk(folder):
         lines = []
         for file in sorted(files):
             file = os.path.join(folder, file)
-            lines += read_manifest(file)
+            lines += load_data(file)
             os.remove(file) # Remove chunk files
-        write_manifest(os.path.join(folder, f'{task}.jsonl'), lines)
+        dump_jsonl(os.path.join(folder, f'{task}.jsonl'), lines)
 
 
 def main():

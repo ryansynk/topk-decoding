@@ -171,6 +171,5 @@ cython_debug/
 .pypirc
 
 # Experiment data
-experiments/timing/outputs
-experiments/timing/logs
-experiments/timing/profile
+benchmarks/ruler/data/synthetic/json/*.json
+benchmarks/ruler/ruler_eval_results/
