@@ -56,7 +56,9 @@ def _topk_generate(self, *args, **kwargs):
         # base_model = getattr(model, model.base_model_prefix, model)
         base_model = getattr(self, self.base_model_prefix, self)
         for layer in base_model.layers:
-            layer.self_attn = layer.orig_self_attn
+            # Only restore orig_self_attn if it exists (i.e., if attn=True was used)
+            if hasattr(layer, "orig_self_attn"):
+                layer.self_attn = layer.orig_self_attn
 
         # do forward pass
         # TODO Offloading? Static?
@@ -74,9 +76,10 @@ def _topk_generate(self, *args, **kwargs):
             cache, index_type=index_type
         )
 
-        # patch topk attention back on
+        # patch topk attention back on (only if it exists, i.e., if attn=True was used)
         for layer in base_model.layers:
-            layer.self_attn = layer.topk_self_attn
+            if hasattr(layer, "topk_self_attn"):
+                layer.self_attn = layer.topk_self_attn
         print("Prefill complete")
 
     return self.original_generate(*args, **kwargs)
