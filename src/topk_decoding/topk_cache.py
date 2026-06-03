@@ -35,10 +35,14 @@ class TopkCache(Cache):
     """
 
     def __init__(self, flat: bool = True) -> None:
+        # transformers >= 5 requires `layers` or `layer_class_to_replicate` to be passed
+        # to the Cache base class. TopkCache manages its own per-layer storage in
+        # `key_cache`/`value_cache`, so we hand the parent an empty list and ignore its
+        # layer-management machinery.
+        super().__init__(layers=[])
         self.key_cache: List[(faiss.swigfaiss_avx2.IndexFlatIP, torch.Tensor)] = []
         self.value_cache: List[(torch.Tensor, torch.Tensor)] = []
         self.seq_lengths: DefaultDict[int, int] = defaultdict(int)
-        super().__init__()
 
     def __len__(self) -> int:
         return self.get_seq_length()
@@ -239,22 +243,25 @@ class TopkCache(Cache):
         dynamic_cache: DynamicCache,
         index_type: str = "flat",
     ):
+        # transformers >= 5: DynamicCache stores per-layer state in `.layers`
+        # (a list of DynamicLayer objects with `.keys`/`.values`) instead of the old
+        # flat `.key_cache`/`.value_cache` lists.
         cache = cls()
         key_cache = []
-        for k in dynamic_cache.key_cache:
-            key_db = cls.create_key_database(k, index_type=index_type)
-            key_cache.append((key_db, torch.empty(0).cuda().to(k.dtype)))
-        cache.key_cache = key_cache
-
         value_cache = []
-        for v in dynamic_cache.value_cache:
-            value_cache.append((v.cpu(), torch.empty(0).cuda().to(v.dtype)))
-        cache.value_cache = value_cache
-
-        # Sequence lengths
         seq_lengths = defaultdict(int)
-        for layer in range(len(dynamic_cache.key_cache)):
-            seq_lengths[layer] = dynamic_cache.get_seq_length(layer)
-        cache.seq_lengths = seq_lengths
 
+        for layer_idx, layer in enumerate(dynamic_cache.layers):
+            k = layer.keys
+            v = layer.values
+            key_db = cls.create_key_database(k, index_type=index_type)
+            empty_suffix_k = torch.empty(0, dtype=k.dtype, device=k.device)
+            empty_suffix_v = torch.empty(0, dtype=v.dtype, device=v.device)
+            key_cache.append((key_db, empty_suffix_k))
+            value_cache.append((v.cpu(), empty_suffix_v))
+            seq_lengths[layer_idx] = dynamic_cache.get_seq_length(layer_idx)
+
+        cache.key_cache = key_cache
+        cache.value_cache = value_cache
+        cache.seq_lengths = seq_lengths
         return cache

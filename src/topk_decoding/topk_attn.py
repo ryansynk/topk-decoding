@@ -330,12 +330,12 @@ class TopkAttention(nn.Module):
         hidden_states: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
-        past_key_value: Optional[Cache] = None,
+        past_key_values: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert self.topk_k is not None, "Topk value not set!"
         topk_k = self.topk_k
         bsz, q_len, _ = hidden_states.size()
@@ -356,7 +356,7 @@ class TopkAttention(nn.Module):
         _, self.original_attn.num_heads, _, _ = query_states.shape
         _, self.original_attn.num_key_value_heads, _, _ = key_states.shape
 
-        past_key_value = getattr(self, "past_key_value", past_key_value)
+        past_key_values = getattr(self, "past_key_values", past_key_values)
         cos, sin = position_embeddings
         from transformers.models.llama.modeling_llama import apply_rotary_pos_emb
 
@@ -376,13 +376,13 @@ class TopkAttention(nn.Module):
             "cos": cos,
             "cache_position": cache_position,
         }
-        num_prev_seen_tokens = past_key_value.get_seq_length(
+        num_prev_seen_tokens = past_key_values.get_seq_length(
             self.original_attn.layer_idx
         )
         (prefix_key_db, suffix_key_states), (
             prefix_value_states,
             suffix_value_states,
-        ) = past_key_value.update(
+        ) = past_key_values.update(
             key_states, value_states, self.original_attn.layer_idx, cache_kwargs
         )
         if prefix_value_states.ndim == 3:

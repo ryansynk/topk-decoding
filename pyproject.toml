@@ -5,30 +5,47 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "topk_decoding"
 version = "0.0.1"
-dependencies = [
-    "transformers",
-    "torch",
-    "einops",
-    "faiss-gpu-cu12",
-]
+description = "Topk decoding"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
 authors = [
     {name = "Ryan Synk", email="ryansynk@umd.edu"},
     {name = "Monte Hoover", email="mhoover4@umd.edu"},
 ]
-description = "Topk decoding"
-readme = "README.md"
-requires-python = ">=3.8"
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
 ]
-license = { name = "Apache-2.0", file = "LICENSE" }
+dependencies = [
+    "transformers",
+    "torch",
+    "einops",
+    "faiss-cpu",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "black",
+]
 
 [project.urls]
 Homepage = "https://github.com/ryansynk/topk-decoding"
 Issues = "https://github.com/ryansynk/topk-decoding/issues"
 
+[project.scripts]
+topk-run = "project_setup.run:main"
+
+[tool.setuptools]
+packages = ["topk_decoding", "project_setup"]
+
+[tool.setuptools.package-dir]
+topk_decoding = "src/topk_decoding"
+project_setup = "project_setup"
+
 [tool.pytest.ini_options]
 addopts = [
     "--import-mode=importlib",
 ]
+pythonpath = ["."]
